@@ -3,7 +3,7 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.0
+;; Version: 1.1
 ;; Keywords: lisp, maint, regexps
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -50,9 +50,17 @@
 ;; maximum readability, consistency and personal preference when
 ;; replacing existing regexps in elisp code.
 
-;; Similar functionality is provided by the `lex' package in the form of the
-;; `lex-parse-re' function, but `xr' does not depend on `lex' and does
-;; a more thorough job of handling all corner cases of Elisp's regexp syntax.
+;; Related work:
+;;
+;; The `lex' package, a lexical analyser generator, provides the
+;; `lex-parse-re' function which performs a similar task, but does not
+;; attempt to handle all the edge cases of Elisp's regexp syntax or
+;; pretty-print the result.
+;;
+;; The `pcre2el' package, a regexp syntax converter and interactive regexp
+;; explainer, could also be used for the same tasks. `xr' is narrower in
+;; scope but more accurate for the purpose of parsing Emacs regexps and
+;; printing the results in rx form.
 
 ;;; Code:
 
@@ -78,7 +86,7 @@
                            '(ascii alnum alpha blank cntrl digit graph
                              lower multibyte nonascii print punct space
                              unibyte upper word xdigit)))
-            (error "No such character class: %s" sym))
+            (error "No character class `%s'" sym))
           (push sym set)
           (goto-char (match-end 0))))
        ;; character range
@@ -150,7 +158,9 @@
 
 (defun xr--char-category (negated category-code)
   (let ((sym (assq category-code
-                   '((?0 . consonant)
+                   '((?\s . space-for-indent)
+                     (?. . base)
+                     (?0 . consonant)
                      (?1 . base-vowel)                        
                      (?2 . upper-diacritical-mark)            
                      (?3 . lower-diacritical-mark)            
@@ -168,7 +178,9 @@
                      (?H . japanese-hiragana-two-byte)        
                      (?I . indian-two-byte)                   
                      (?K . japanese-katakana-two-byte)        
+                     (?L . strong-left-to-right)
                      (?N . korean-hangul-two-byte)            
+                     (?R . strong-right-to-left)
                      (?Y . cyrillic-two-byte)         
                      (?^ . combining-diacritic)               
                      (?a . ascii)                             
@@ -189,10 +201,10 @@
                      (?w . hebrew)                            
                      (?y . cyrillic)                          
                      (?| . can-break)))))
-    (when (not sym)
-      (error "Unknown category code: %s" category-code))
-    (let ((item (list 'category (cdr sym))))
-      (if negated (list 'not item) item))))
+    (if sym
+        (let ((item (list 'category (cdr sym))))
+          (if negated (list 'not item) item))
+      (list 'regexp (format "\\%c%c" (if negated ?C ?c) category-code)))))
 
 (defun xr--char-syntax (negated syntax-code)
   (let ((sym (assq syntax-code
@@ -200,6 +212,7 @@
                      (?\s . whitespace)
                      (?.  . punctuation)
                      (?w  . word)
+                     (?W  . word)       ; undocumented
                      (?_  . symbol)
                      (?\( . open-parenthesis)
                      (?\) . close-parenthesis)
@@ -213,7 +226,7 @@
                      (?|  . string-delimiter)
                      (?!  . comment-delimiter)))))
     (when (not sym)
-      (error "Unknown syntax code: %s" syntax-code))
+      (error "Unknown syntax code `%c'" syntax-code))
     (let ((item (list 'syntax (cdr sym))))
       (if negated (list 'not item) item))))
 
@@ -313,12 +326,16 @@
           (push (xr--parse-char-alt negated) sequence)))
 
        ;; group
-       ((looking-at (rx "\\("
-                        (opt (group "?" (group (zero-or-more digit)) ":"))))
+       ((looking-at (rx "\\(" (opt (group "?")
+                                   (opt (opt (group (any "1-9")
+                                                    (zero-or-more digit)))
+                                        (group ":")))))
         (let ((question (match-string 1))
               (number (match-string 2))
-              (end (match-end 0)))
-          (goto-char end)
+              (colon (match-string 3)))
+          (when (and question (not colon))
+            (error "Invalid \\(? syntax"))
+          (goto-char (match-end 0))
           (let* ((group (xr--parse-alt))
                  ;; simplify - group has an implicit seq
                  (operand (if (and (listp group) (eq (car group) 'seq))
@@ -327,24 +344,24 @@
             (when (not (looking-at (rx "\\)")))
               (error "Missing \\)"))
             (forward-char 2)
-            (let ((item (cond ((not question)           ; plain subgroup
-                               (cons 'group operand))
-                              ((zerop (length number))  ; shy group
-                               group)
-                              (t
+            (let ((item (cond (number   ; numbered group
                                (append (list 'group-n (string-to-number number))
-                                       operand)))))
+                                       operand))
+                              (question ; shy group
+                               group)
+                              (t        ; plain group
+                               (cons 'group operand)))))
               (push item sequence)))))
 
        ;; back-reference
-       ((looking-at (rx "\\" (group digit)))
+       ((looking-at (rx "\\" (group (any "1-9"))))
         (forward-char 2)
         (push (list 'backref (string-to-number (match-string 1)))
               sequence))
 
        ;; various simple substitutions
        ((looking-at (rx (or "." "\\w" "\\W" "\\`" "\\'" "\\="
-                            "\\b" "\\B" "\\<" "\\>" "\\_<" "\\_>")))
+                            "\\b" "\\B" "\\<" "\\>")))
         (goto-char (match-end 0))
         (let ((sym (cdr (assoc
                          (match-string 0)
@@ -353,23 +370,37 @@
                            ("\\`" . bos) ("\\'" . eos)
                            ("\\=" . point)
                            ("\\b" . word-boundary) ("\\B" . not-word-boundary)
-                           ("\\<" . bow) ("\\>" . eow)
-                           ("\\_<" . symbol-start) ("\\_>" . symbol-end))))))
+                           ("\\<" . bow) ("\\>" . eow))))))
           (push sym sequence)))
 
+       ;; symbol-start, symbol-end
+       ((looking-at (rx "\\_" (opt (group (any "<>")))))
+        (let ((arg (match-string 1)))
+          (unless arg
+            (error "Invalid \\_ sequence"))
+          (forward-char 3)
+          (push (if (string-equal arg "<") 'symbol-start 'symbol-end)
+                sequence)))
+
        ;; character syntax
-       ((looking-at (rx "\\" (group (any "sS")) (group anything)))
+       ((looking-at (rx "\\" (group (any "sS")) (opt (group anything))))
         (let ((negated (string-equal (match-string 1) "S"))
-              (syntax-code (string-to-char (match-string 2))))
+              (syntax-code (match-string 2)))
+          (unless syntax-code
+            (error "Incomplete \\%s sequence" (match-string 1)))
           (goto-char (match-end 0))
-          (push (xr--char-syntax negated syntax-code) sequence)))
+          (push (xr--char-syntax negated (string-to-char syntax-code))
+                sequence)))
 
        ;; character categories
-       ((looking-at (rx "\\" (group (any "cC")) (group anything)))
+       ((looking-at (rx "\\" (group (any "cC")) (opt (group anything))))
         (let ((negated (string-equal (match-string 1) "C"))
-              (category-code (string-to-char (match-string 2))))
+              (category-code (match-string 2)))
+          (unless category-code
+            (error "Incomplete \\%s sequence" (match-string 1)))
           (goto-char (match-end 0))
-          (push (xr--char-category negated category-code) sequence)))
+          (push (xr--char-category negated (string-to-char category-code))
+                sequence)))
 
        ;; Escaped character. Only \*+?.^$[ really need escaping, but we accept
        ;; any not otherwise handled character after the backslash since
@@ -460,9 +491,9 @@ equivalent to RE-STRING."
             "\""))
    (t (prin1-to-string rx))))
 
-;; Pretty-print a regexp (in rx notation) to a string.
-;; It does a slightly better job than standard `pp' for rx purposes.
-(defun xr--pp-rx-to-str (rx)
+(defun xr-pp-rx-to-str (rx)
+  "Pretty-print the regexp RX (in rx notation) to a string.
+It does a slightly better job than standard `pp' for rx purposes."
   (with-temp-buffer
     (insert (xr--rx-to-string rx) "\n")
     (pp-buffer)
@@ -483,198 +514,11 @@ equivalent to RE-STRING."
 ;;;###autoload
 (defun xr-pp (re-string)
   "Convert to `rx' notation and pretty-print.
-This basically does `(pp (rx RE-STRING))', but in a slightly more readable
+This basically does `(pp (xr RE-STRING))', but in a slightly more readable
 way.  It is intended for use from an interactive elisp session.
 Returns nil."
-  (insert (xr--pp-rx-to-str (xr re-string))))
-
-
-(defun xr--expect-result (fun input expected)
-  "Verify (FUN INPUT) against EXPECTED."
-  (let ((got (funcall fun input)))
-    (unless (equal got expected)
-      (error "Failure in (%s %S):\ngot      %S\nexpected %S"
-             fun input got expected))))
-
-(defun xr--expect (regexp-str expected-rx)
-  "Verify (xr REGEXP-STR) against EXPECTED-RX."
-  (xr--expect-result 'xr regexp-str expected-rx))
-
-(defun xr--expect-pp (rx expected-str)
-  "Verify (xr--pp-rx-to-str RX) against EXPECTED-STR."
-  (xr--expect-result 'xr--pp-rx-to-str rx expected-str))
+  (insert (xr-pp-rx-to-str (xr re-string))))
 
 (provide 'xr)
-
-(eval-when-compile
-  ;; FIXME: When byte-compiling the file, this `eval-when-compile' block
-  ;; will be executed at a time where the above functions have been compiled
-  ;; but they're not necessarily known by the current Emacs session yet
-  ;; (because the neither `xr.el' nor `xr.elc' has been loaded yet).
-  ;; As a quick fix, we (require 'xr) here to load the `xr' file (and fail
-  ;; silently if the file is not in `load-path').
-  ;; Maybe a better fix is to move those tests to a separate file, and/or
-  ;; to wrap them in an `ert-deftest'.
-  (when (require 'xr nil 'noerror)
-  (xr--expect "a\\$b\\\\c\\[\\]\\q"
-              "a$b\\c[]q")
-  (xr--expect "\\(?:ab\\|c*d\\)?"
-              '(opt (or "ab" (seq (zero-or-more "c") "d"))))
-  (xr--expect ".+"
-              '(one-or-more nonl))
-  (xr--expect "\\(?:x?y\\)\\{3\\}"
-              '(= 3 (opt "x") "y"))
-  (xr--expect "\\(?:x?y\\)\\{3,8\\}"
-              '(repeat 3 8 (opt "x") "y"))
-  (xr--expect "\\(?:x?y\\)\\{3,\\}"
-              '(>= 3 (opt "x") "y"))
-  (xr--expect "\\(?:x?y\\)\\{,8\\}"
-              '(repeat 0 8 (opt "x") "y"))
-  (xr--expect "\\(?:xy\\)\\{4,4\\}"
-              '(= 4 "xy"))
-  (xr--expect "a\\{,\\}"
-              '(zero-or-more "a"))
-  (xr--expect "a\\{0\\}"
-              '(repeat 0 0 "a"))
-  (xr--expect "a\\{0,\\}"
-              '(zero-or-more "a"))
-  (xr--expect "a\\{0,0\\}"
-              '(repeat 0 0 "a"))
-  (xr--expect "a\\{\\}"
-              '(repeat 0 0 "a"))
-  (xr--expect "a\\{,1\\}"
-              '(repeat 0 1 "a"))
-  (xr--expect "a\\{1,\\}"
-              '(>= 1 "a"))
-  (xr--expect "\\(ab\\)\\(?3:cd\\)\\1\\3"
-              '(seq (group "ab") (group-n 3 "cd") (backref 1) (backref 3)))
-  (xr--expect "^.\\w\\W\\`\\'\\=\\b\\B\\<\\>\\_<\\_>$"
-              '(seq bol nonl wordchar not-wordchar bos eos point
-                    word-boundary not-word-boundary bow eow
-                    symbol-start symbol-end eol))
-  (xr--expect "\\s-\\s \\sw\\s_\\s.\\s(\\s)\\s\""
-              '(seq (syntax whitespace) (syntax whitespace) (syntax word)
-                    (syntax symbol) (syntax punctuation)
-                    (syntax open-parenthesis) (syntax close-parenthesis)
-                    (syntax string-quote)))
-  (xr--expect "\\s\\\\s/\\s$\\s'\\s<\\s>\\s!\\s|"
-              '(seq (syntax escape) (syntax character-quote)
-                    (syntax paired-delimiter) (syntax expression-prefix)
-                    (syntax comment-start) (syntax comment-end)
-                    (syntax comment-delimiter) (syntax string-delimiter)))
-  (xr--expect "\\S-\\S<"
-              '(seq (not (syntax whitespace))
-                    (not (syntax comment-start))))
-  (xr--expect "\\c0\\c1\\c2\\c3\\c4\\c5\\c6\\c7\\c8\\c9\\c<\\c>"
-              '(seq (category consonant) (category base-vowel)
-                    (category upper-diacritical-mark)
-                    (category lower-diacritical-mark)
-                    (category tone-mark) (category symbol) (category digit)
-                    (category vowel-modifying-diacritical-mark)
-                    (category vowel-sign) (category semivowel-lower)
-                    (category not-at-end-of-line)
-                    (category not-at-beginning-of-line)))
-  (xr--expect "\\cA\\cC\\cG\\cH\\cI\\cK\\cN\\cY\\c^"
-          '(seq (category alpha-numeric-two-byte) (category chinese-two-byte)
-                (category greek-two-byte) (category japanese-hiragana-two-byte)
-                (category indian-two-byte)
-                (category japanese-katakana-two-byte)
-                (category korean-hangul-two-byte) (category cyrillic-two-byte)
-                (category combining-diacritic)))
-  (xr--expect "\\ca\\cb\\cc\\ce\\cg\\ch\\ci\\cj\\ck\\cl\\co\\cq\\cr"
-          '(seq (category ascii) (category arabic) (category chinese)
-                (category ethiopic) (category greek) (category korean)
-                (category indian)  (category japanese)
-                (category japanese-katakana) (category latin) (category lao)
-                (category tibetan) (category japanese-roman)))
-  (xr--expect "\\ct\\cv\\cw\\cy\\c|"
-              '(seq (category thai) (category vietnamese) (category hebrew)
-                    (category cyrillic) (category can-break)))
-  (xr--expect "\\C2\\C^"
-              '(seq (not (category upper-diacritical-mark))
-                    (not (category combining-diacritic))))
-  (xr--expect "\\(?:a.\\)*?"
-              '(*? "a" nonl))
-  (xr--expect "\\(?:a.\\)+?"
-              '(+? "a" nonl))
-  (xr--expect "\\(?:a.\\)??"
-              '(?? "a" nonl))
-  (xr--expect "\\(?:.\\(a+\\(?:b+?c*\\)?\\)??\\)*"
-              '(zero-or-more
-                nonl
-                (?? (group (one-or-more "a")
-                           (opt (+? "b")
-                                (zero-or-more "c"))))))
-  (xr--expect "[[:alnum:][:blank:]][[:alpha:]][[:cntrl:][:digit:]]"
-              '(seq (any alnum blank) alpha (any cntrl digit)))
-  (xr--expect "[^[:lower:][:punct:]][^[:space:]]"
-              '(seq (not (any lower punct)) (not space)))
-  (xr--expect "^[a-z]*"
-              '(seq bol (zero-or-more (any "a-z"))))
-  (xr--expect "some[.]thing"
-              "some.thing")
-  (xr--expect "[^]-c]"
-              '(not (any "]-c")))
-  (xr--expect "[-^]"
-              '(any "-" "^"))
-  (xr--expect "[a-z-+/*%0-4[:xdigit:]]"
-              '(any "a-z" "-" "+/*%" "0-4" xdigit))
-  (xr--expect "[^]A-Za-z-]*"
-              '(zero-or-more (not (any "]" "A-Za-z" "-"))))
-  (xr--expect "[+*%A-Ka-k0-3${-}]"
-              '(any "+*%" "A-Ka-k0-3" "$" "{-}"))
-  (xr--expect ""
-              "")
-  (xr--expect "a\\|"
-              '(or "a" ""))
-  (xr--expect "\\|a"
-              '(or "" "a"))
-  (xr--expect "a\\|\\|b"
-              '(or "a" "" "b"))
-  (xr--expect "\\(?:.\\|\n\\)?\\(\n\\|.\\)*"
-              '(seq (opt anything) (zero-or-more (group anything))))
-  (xr--expect "\\*\\*\\* EOOH \\*\\*\\*\n"
-              "*** EOOH ***\n")
-  (xr--expect "\\<\\(catch\\|finally\\)\\>[^_]"
-              '(seq bow (group (or "catch" "finally")) eow
-                    (not (any "_"))))
-  (xr--expect "[ \t\n]*:\\([^:]+\\|$\\)"
-              '(seq (zero-or-more (any " \t\n")) ":"
-                    (group (or (one-or-more (not (any ":")))
-                               eol))))
-  (xr--expect "^a^b\\(?:^c^\\|^d^\\|e^\\)^"
-              '(seq bol "a^b" (or (seq bol "c^") (seq bol "d^") "e^") "^"))
-  (xr--expect "$a$b\\(?:$c$\\|$d$\\|$e$\\)$"
-              '(seq "$a$b" (or (seq "$c" eol) (seq "$d" eol) (seq "$e" eol))
-                    eol))
-  (xr--expect "*a\\|*b\\(*c\\)"
-              '(or "*a" (seq "*b" (group "*c"))))
-  (xr--expect "+a\\|+b\\(+c\\)"
-              '(or "+a" (seq "+b" (group "+c"))))
-  (xr--expect "?a\\|?b\\(?c\\)"
-              '(or "?a" (seq "?b" (group "?c"))))
-  (xr--expect "^**"
-              '(seq bol (zero-or-more "*")))
-  (xr--expect "^+"
-              '(seq bol "+"))
-  (xr--expect "^?"
-              '(seq bol "?"))
-  (xr--expect "*?a\\|^??b"
-              '(or (seq (opt "*") "a") (seq bol (opt "?") "b")))
-  (xr--expect "^\\{xy"
-              '(seq bol "{xy"))
-  (xr--expect "\\{2,3\\}"
-              "{2,3}")
-  (xr--expect "a\\(?:b?\\(?:c.\\)d*\\)e"
-              '(seq "a" (opt "b") "c" nonl (zero-or-more "d") "e"))
-  (xr--expect "a\\(?:b\\(?:c.d\\)e\\)f"
-              '(seq "abc" nonl "def"))
-  (xr--expect-pp "A\e\r\n\t\0 \x7f\x80\ B\xff\x02"
-                 "\"A\\e\\r\\n\\t\\x00 \\x7f\\200B\\xff\\x02\"\n")
-  (xr--expect-pp '(?? nonl)
-                 "(?? nonl)\n")
-  (xr--expect-pp '(repeat 1 63 "a")
-                 "(repeat 1 63 \"a\")\n")
-  ))
 
 ;;; xr.el ends here
