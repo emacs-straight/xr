@@ -26,7 +26,7 @@
 ;;
 ;; - Migrating existing code to rx form, for better readability and
 ;;   maintainability
-;; - Understanding complex regexp strings
+;; - Understanding complex regexp strings and finding errors in them
 ;;   
 ;; Please refer to `rx' for more information about the notation.
 ;;
@@ -121,17 +121,20 @@
        (t
         (let* ((ch (following-char))
                (ch-str (char-to-string ch)))
-          (when (and (eq ch ?\\)
-                     (stringp (car set))
-                     (string-match "\\\\\\'" (car set)))
+          (cond
+           ;; Duplicated \ are common enough for us to remove them (and warn).
+           ((and (eq ch ?\\)
+                 (stringp (car set))
+                 (eq (string-to-char (substring (car set) -1)) ?\\))
             (xr--report warnings (1- (point))
                         "Escaped `\\' inside character alternative"))
-          ;; Merge with the previous string if neither contains "-".
-          (if (and (stringp (car set))
-                   (not (eq ch ?-))
-                   (not (string-match "-" (car set))))
-              (setq set (cons (concat (car set) ch-str) (cdr set)))
-            (push ch-str set)))
+           ;; Merge with the previous string if neither contains "-".
+           ((and (stringp (car set))
+                 (not (eq ch ?-))
+                 (not (string-match "-" (car set))))
+            (setq set (cons (concat (car set) ch-str) (cdr set))))
+           (t
+            (push ch-str set))))
         (forward-char 1))))
 
     (forward-char 1)                    ; eat the ]
@@ -241,7 +244,8 @@
                      (?|  . string-delimiter)
                      (?!  . comment-delimiter)))))
     (when (not sym)
-      (error "Unknown syntax code `%c'" syntax-code))
+      (error "Unknown syntax code `%s'"
+             (xr--escape-string (char-to-string syntax-code))))
     (let ((item (list 'syntax (cdr sym))))
       (if negated (list 'not item) item))))
 
@@ -310,6 +314,11 @@
         (if (and sequence
                  (not (and (eq (car sequence) 'bol) (eq (preceding-char) ?^))))
             (let ((operator (match-string 0)))
+              (when (and (consp (car sequence))
+                         (memq (caar sequence)
+                               '(opt zero-or-more one-or-more +? *? ??)))
+                (xr--report warnings (match-beginning 0)
+                            "Repetition of repetition"))
               (goto-char (match-end 0))
               (setq sequence (cons (xr--postfix operator (car sequence))
                                    (cdr sequence))))
@@ -324,6 +333,11 @@
              sequence
              (not (and (eq (car sequence) 'bol) (eq (preceding-char) ?^))))
         (forward-char 2)
+        (when (and (consp (car sequence))
+                   (memq (caar sequence)
+                         '(opt zero-or-more one-or-more +? *? ??)))
+          (xr--report warnings (match-beginning 0)
+                      "Repetition of repetition"))
         (if (looking-at (rx (opt (group (one-or-more digit)))
                             (opt (group ",")
                                  (opt (group (one-or-more digit))))
@@ -433,14 +447,16 @@
        ;; Escaped character. Only \*+?.^$[ really need escaping, but we accept
        ;; any not otherwise handled character after the backslash since
        ;; such sequences are found in the wild.
-       ((looking-at (rx "\\" (group (or (any "\\*+?.^$[")
+       ((looking-at (rx "\\" (group (or (any "\\*+?.^$[]")
                                         (group anything)))))
         (forward-char 2)
         (push (match-string 1) sequence)
         (when (match-beginning 2)
+          ;; Note that we do not warn about \\], since the symmetry with \\[
+          ;; makes it unlikely to be a serious error.
           (xr--report warnings (match-beginning 0)
                       (format "Escaped non-special character `%s'"
-                              (match-string 2)))))
+                              (xr--escape-string (match-string 2))))))
 
        (t (error "Backslash at end of regexp"))))
 
@@ -493,6 +509,36 @@ in RE-STRING."
     (xr--parse re-string warnings)
     (reverse (car warnings))))
 
+;; Escape non-printing characters in a string for maximum readability.
+(defun xr--escape-string (string)
+  ;; Translate control and raw chars to escape sequences for readability.
+  ;; We prefer hex escapes (\xHH) since that is usually what the user wants,
+  ;; but use octal (\OOO) if a legitimate hex digit follows, as
+  ;; hex escapes are not limited to two digits.
+  (replace-regexp-in-string
+   "[\x00-\x1f\"\\\x7f\x80-\xff][[:xdigit:]]?"
+   (lambda (s)
+     (let* ((c (logand (string-to-char s) #xff))
+            (xdigit (substring s 1))
+            (transl (assq c
+                          '((?\" . "\\\"")
+                            (?\\ . "\\\\")
+                            (?\a . "\\a")
+                            (?\b . "\\b")
+                            (?\t . "\\t")
+                            (?\n . "\\n")
+                            (?\v . "\\v")
+                            (?\f . "\\f")
+                            (?\r . "\\r")
+                            (?\e . "\\e")))))
+       (concat
+        (if transl
+            (cdr transl)
+          (format (if (zerop (length xdigit)) "\\x%02x" "\\%03o")
+                  c))
+        xdigit)))
+   string 'fixedcase 'literal))
+
 ;; Print a rx expression to a string, unformatted.
 (defun xr--rx-to-string (rx)
   (cond
@@ -507,35 +553,7 @@ in RE-STRING."
           (rest (mapcar #'xr--rx-to-string (cdr rx))))
       (concat "(" (mapconcat #'identity (cons first rest) " ") ")")))
    ((stringp rx)
-    ;; Translate control and raw chars to escape sequences for readability.
-    ;; We prefer hex escapes (\xHH) since that is usually what the user wants,
-    ;; but use octal (\OOO) if a legitimate hex digit follows, as
-    ;; hex escapes are not limited to two digits.
-    (concat "\""
-            (replace-regexp-in-string
-             "[\x00-\x1f\"\\\x7f\x80-\xff][[:xdigit:]]?"
-             (lambda (s)
-               (let* ((c (logand (string-to-char s) #xff))
-                      (xdigit (substring s 1))
-                      (transl (assq c
-                                    '((?\" . "\\\"")
-                                      (?\\ . "\\\\")
-                                      (?\a . "\\a")
-                                      (?\b . "\\b")
-                                      (?\t . "\\t")
-                                      (?\n . "\\n")
-                                      (?\v . "\\v")
-                                      (?\f . "\\f")
-                                      (?\r . "\\r")
-                                      (?\e . "\\e")))))
-                 (concat
-                  (if transl
-                      (cdr transl)
-                    (format (if (zerop (length xdigit)) "\\x%02x" "\\%03o")
-                            c))
-                  xdigit)))
-             rx 'fixedcase 'literal)
-            "\""))
+    (concat "\"" (xr--escape-string rx) "\""))
    (t (prin1-to-string rx))))
 
 (defun xr-pp-rx-to-str (rx)
