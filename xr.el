@@ -87,7 +87,7 @@
             (push (vector ?\] end (point)) intervals)
           (xr--report warnings (point)
                       (format "Reversed range `%s' matches nothing"
-                              (match-string 0)))))
+                              (xr--escape-string (match-string 0) nil)))))
       (goto-char (match-end 0)))
      ;; Initial ]
      ((looking-at "]")
@@ -97,13 +97,13 @@
     (while (not (looking-at "]"))
       (cond
        ;; character class
-       ((looking-at (rx "[:" (group (one-or-more letter)) ":]"))
+       ((looking-at (rx "[:" (group (*? anything)) ":]"))
         (let ((sym (intern (match-string 1))))
-          (when (not (memq sym
-                           '(ascii alnum alpha blank cntrl digit graph
-                             lower multibyte nonascii print punct space
-                             unibyte upper word xdigit)))
-            (error "No character class `%s'" sym))
+          (unless (memq sym
+                        '(ascii alnum alpha blank cntrl digit graph
+                          lower multibyte nonascii print punct space
+                          unibyte upper word xdigit))
+            (error "No character class `%s'" (match-string 0)))
           (if (memq sym classes)
               (xr--report warnings (point)
                           (format "Duplicated character class `[:%s:]'" sym))
@@ -119,7 +119,7 @@
            (t
             (xr--report warnings (point)
                         (format "Reversed range `%s' matches nothing"
-                                (match-string 0)))))
+                                (xr--escape-string (match-string 0) nil)))))
           (goto-char (match-end 0))))
        ((looking-at (rx eos))
         (error "Unterminated character alternative"))
@@ -559,7 +559,8 @@
     (set-buffer-multibyte t)
     (insert re-string)
     (goto-char (point-min))
-    (let ((rx (xr--parse-alt warnings)))
+    (let* ((case-fold-search nil)
+           (rx (xr--parse-alt warnings)))
       (when (looking-at (rx "\\)"))
         (error "Unbalanced \\)"))
       rx)))
@@ -634,8 +635,8 @@ in RE-STRING."
     (sort (car warnings) #'car-less-than-car)))
 
 ;; Escape non-printing characters in a string for maximum readability.
-;; If ESCAPE-BACKSLASH, also escape \, otherwise don't.
-(defun xr--escape-string (string escape-backslash)
+;; If ESCAPE-PRINTABLE, also escape \ and ", otherwise don't.
+(defun xr--escape-string (string escape-printable)
   ;; Translate control and raw chars to escape sequences for readability.
   ;; We prefer hex escapes (\xHH) since that is usually what the user wants,
   ;; but use octal (\OOO) if a legitimate hex digit follows, as
@@ -646,8 +647,7 @@ in RE-STRING."
      (let* ((c (logand (string-to-char s) #xff))
             (xdigit (substring s 1))
             (transl (assq c
-                          '((?\" . "\\\"")
-                            (?\b . "\\b")
+                          '((?\b . "\\b")
                             (?\t . "\\t")
                             (?\n . "\\n")
                             (?\v . "\\v")
@@ -656,8 +656,8 @@ in RE-STRING."
                             (?\e . "\\e")))))
        (concat
         (cond (transl (cdr transl))
-              ((eq c ?\\)
-               (if escape-backslash "\\\\" "\\"))
+              ((memq c '(?\\ ?\"))
+               (if escape-printable (string ?\\ c) (string c)))
               ((zerop (length xdigit)) (format "\\x%02x" c))
               (t (format (format "\\%03o" c))))
         xdigit)))
