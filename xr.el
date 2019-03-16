@@ -3,7 +3,7 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.5
+;; Version: 1.6
 ;; Keywords: lisp, maint, regexps
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -545,7 +545,11 @@
     (push (xr--parse-seq warnings) alternatives)
     (while (not (looking-at (rx (or "\\)" eos))))
       (forward-char 2)                  ; skip \|
-      (push (xr--parse-seq warnings) alternatives))
+      (let ((pos (point))
+            (seq (xr--parse-seq warnings)))
+        (when (and warnings (member seq alternatives))
+          (xr--report warnings pos "Duplicated alternative branch"))
+        (push seq alternatives)))
     (if (cdr alternatives)
         ;; Simplify (or nonl "\n") to anything
         (if (or (equal alternatives '(nonl "\n"))
@@ -706,10 +710,10 @@ It does a slightly better job than standard `pp' for rx purposes."
 
 ;;;###autoload
 (defun xr-pp (re-string &optional dialect)
-  "Convert to `rx' notation and pretty-print.
-This basically does `(pp (xr RE-STRING DIALECT))', but in a slightly
-more readable way.  It is intended for use from an interactive elisp
-session.  Returns nil."
+  "Convert to `rx' notation and output the pretty-printed result.
+This function uses `xr' to translate RE-STRING into DIALECT.
+It is intended for use from an interactive elisp session.
+See `xr' for a description of the DIALECT argument."
   (insert (xr-pp-rx-to-str (xr re-string dialect))))
 
 (provide 'xr)
