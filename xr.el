@@ -3,7 +3,7 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.7
+;; Version: 1.9
 ;; Keywords: lisp, maint, regexps
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -31,54 +31,51 @@
 ;; Please refer to `rx' for more information about the notation.
 ;;
 ;; In addition to Emacs regexps, this package can also parse and
-;; troubleshoot skip set strings, which are arguments to
+;; find mistakes in skip set strings, which are arguments to
 ;; `skip-chars-forward' and `skip-chars-backward'.
 ;;
-;; The exported functions for regexps are:
+;; The exported functions are:
 ;;
+;;  Regexps:
 ;;  `xr'               - returns the converted rx expression
 ;;  `xr-pp'            - converts to rx and pretty-prints
 ;;  `xr-lint'          - finds mistakes in a regexp string
 ;;
-;; For skip sets we also have:
-;;
+;;  Skip sets:
 ;;  `xr-skip-set'      - return the converted rx expression
 ;;  `xr-skip-set-pp'   - converts to rx and pretty-prints
 ;;  `xr-skip-set-lint' - finds mistakes in a skip set string
 ;;
-;; There is finally the generally useful:
-;;
+;;  General:
 ;;  `xr-pp-rx-to-str' - pretty-prints an rx expression to a string
-;;
-;; Suggested use is from an interactive elisp buffer.
 ;;
 ;; Example (regexp found in compile.el):
 ;;
 ;;   (xr-pp "\\`\\(?:[^^]\\|\\^\\(?: \\*\\|\\[\\)\\)")
 ;; =>
 ;;   (seq bos
-;;        (or
-;;         (not (any "^"))
-;;         (seq "^"
-;;              (or " *" "["))))
+;;        (or (not (any "^"))
+;;            (seq "^"
+;;                 (or " *" "["))))
 ;;
-;; The rx notation admits many synonyms; the xr functions mostly
-;; prefer brief variants, such as `seq' to `sequence' and `nonl' to
-;; `not-newline'.  The user is encouraged to edit the result for
-;; maximum readability, consistency and personal preference when
-;; replacing existing regexps in elisp code.
+;; The rx notation admits many synonyms. The user is encouraged to
+;; edit the result for maximum readability, consistency and personal
+;; preference when replacing existing regexps in elisp code.
 
 ;; Related work:
 ;;
 ;; The `lex' package, a lexical analyser generator, provides the
-;; `lex-parse-re' function which performs a similar task, but does not
-;; attempt to handle all the edge cases of Elisp's regexp syntax or
-;; pretty-print the result.
+;; `lex-parse-re' function which translates regexps to rx, but does
+;; not attempt to handle all the edge cases of Elisp's regexp syntax
+;; or pretty-print the result.
 ;;
-;; The `pcre2el' package, a regexp syntax converter and interactive regexp
-;; explainer, could also be used for the same tasks. `xr' is narrower in
-;; scope but more accurate for the purpose of parsing Emacs regexps and
-;; printing the results in rx form.
+;; The `pcre2el' package, a regexp syntax converter and interactive
+;; regexp explainer, could also be used for translating regexps to rx.
+;; `xr' is narrower in scope but more accurate for the purpose of
+;; parsing Emacs regexps and printing the results in rx form.
+;;
+;; Neither of these packages parse skip-set strings or provide
+;; mistake-finding functions.
 
 ;;; Code:
 
@@ -129,6 +126,8 @@
           (cond
            ((<= start end)
             (push (vector start end (point)) intervals))
+           ;; It's unlikely that anyone writes z-a by mistake; don't complain.
+           ((and (eq start ?z) (eq end ?a)))
            (t
             (xr--report warnings (point)
                         (format "Reversed range `%s' matches nothing"
@@ -606,19 +605,21 @@
 
 ;; Grammar for skip-set strings:
 ;;
-;; skip-set ::= `^'? item*
+;; skip-set ::= `^'? item* dangling?
 ;; item     ::= range | single
-;; range    ::= single `-' end
-;; single   ::= (any char but `\')
-;;            | `\' (any char)
-;; end      ::= single | `\'
+;; range    ::= single `-' endpoint
+;; single   ::= {any char but `\'}
+;;            | `\' {any char}
+;; endpoint ::= single | `\'
+;; dangling ::= `\'
 ;;
-;; The grammar is ambiguous, resolved left-to-right:
-;; - a leading ^ is always a negation marker
-;; - an item is always a range if possible
-;; - an end is only `\' if last in the string
+;; Ambiguities in the above are resolved greedily left-to-right.
 
 (defun xr--parse-skip-set-buffer (warnings)
+  ;; An ad-hoc check, but one that catches lots of mistakes.
+  (when (and (looking-at (rx "[" (one-or-more anything) "]" eos))
+             (not (looking-at (rx "[:" (one-or-more anything) ":]" eos))))
+    (xr--report warnings (point) "Suspect skip set framed in `[...]'"))
   (let ((negated (looking-at (rx "^")))
         (ranges nil)
         (classes nil))
@@ -655,16 +656,26 @@
             (xr--report warnings (point)
                         (xr--escape-string
                          (format "Unnecessarily escaped `%c'" start) nil)))
+          (when (and (match-beginning 3)
+                     (not (memq end '(?^ ?- ?\\))))
+            (xr--report warnings (1- (match-beginning 3))
+                        (xr--escape-string
+                         (format "Unnecessarily escaped `%c'" end) nil)))
           (if (and end (> start end))
               (xr--report warnings (point)
                           (xr--escape-string
                            (format "Reversed range `%c-%c'" start end) nil))
-            (when (eq start end)
+            (cond
+             ((eq start end)
               (xr--report warnings (point)
                           (xr--escape-string
                            (format "Single-element range `%c-%c'" start end)
-                           nil))
-              (setq end nil))
+                           nil)))
+             ((eq (1+ start) end)
+              (xr--report warnings (point)
+                          (xr--escape-string
+                           (format "Two-element range `%c-%c'" start end)
+                           nil))))
             (let ((tail ranges))
               (while tail
                 (let ((range (car tail)))
@@ -702,6 +713,12 @@
                     "Stray `\\' at end of string")))
 
       (goto-char (match-end 0)))
+
+    (when (and (null ranges) (null classes))
+      (xr--report warnings (point-min)
+                  (if negated
+                      "Negated empty set matches anything"
+                    "Empty set matches nothing")))
 
     (cond
      ;; Single non-negated character, like "-": make a string.
