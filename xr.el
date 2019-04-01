@@ -3,7 +3,8 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.9
+;; Version: 1.10
+;; URL: https://github.com/mattiase/xr
 ;; Keywords: lisp, maint, regexps
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -47,7 +48,7 @@
 ;;  `xr-skip-set-lint' - finds mistakes in a skip set string
 ;;
 ;;  General:
-;;  `xr-pp-rx-to-str' - pretty-prints an rx expression to a string
+;;  `xr-pp-rx-to-str'  - pretty-prints an rx expression to a string
 ;;
 ;; Example (regexp found in compile.el):
 ;;
@@ -61,7 +62,7 @@
 ;; The rx notation admits many synonyms. The user is encouraged to
 ;; edit the result for maximum readability, consistency and personal
 ;; preference when replacing existing regexps in elisp code.
-
+;;
 ;; Related work:
 ;;
 ;; The `lex' package, a lexical analyser generator, provides the
@@ -76,6 +77,32 @@
 ;;
 ;; Neither of these packages parse skip-set strings or provide
 ;; mistake-finding functions.
+
+;;; News:
+
+;; Version 1.10:
+;; - Warn about [[:class:]] in skip-sets
+;; - Warn about two-character ranges like [*-+] in regexps
+;; Version 1.9:
+;; - Don't complain about [z-a] and [^z-a] specifically
+;; - Improved skip set checks
+;; Version 1.8:
+;; - Improved skip set checks
+;; Version 1.7:
+;; - Parse skip-sets, adding `xr-skip-set', `xr-skip-set-pp' and
+;;   `xr-skip-set-lint'
+;; - Ad-hoc check for misplaced `]' in regexps
+;; Version 1.6:
+;; - Detect duplicated branches like A\|A
+;; Version 1.5:
+;; - Add dialect option to `xr' and `xr-pp'
+;; - Negative empty sets, [^z-a], now become `anything'
+;; Version 1.4:
+;; - Detect overlap in character alternatives
+;; Version 1.3:
+;; - Improved xr-lint warnings
+;; Version 1.2:
+;; - `xr-lint' added
 
 ;;; Code:
 
@@ -97,6 +124,10 @@
             (push (vector ?\] end (point)) intervals)
           (xr--report warnings (point)
                       (format "Reversed range `%s' matches nothing"
+                              (xr--escape-string (match-string 0) nil))))
+        (when (eq end ?^)
+          (xr--report warnings (point)
+                      (format "Two-character range `%s'"
                               (xr--escape-string (match-string 0) nil)))))
       (goto-char (match-end 0)))
      ;; Initial ]
@@ -132,6 +163,12 @@
             (xr--report warnings (point)
                         (format "Reversed range `%s' matches nothing"
                                 (xr--escape-string (match-string 0) nil)))))
+          ;; Suppress warnings about ranges between adjacent digits,
+          ;; like [0-1], as they are common and harmless.
+          (when (and (= end (1+ start)) (not (<= ?0 start end ?9)))
+            (xr--report warnings (point)
+                        (format "Two-character range `%s'"
+                                (xr--escape-string (match-string 0) nil))))
           (goto-char (match-end 0))))
        ((looking-at (rx eos))
         (error "Unterminated character alternative"))
@@ -616,10 +653,12 @@
 ;; Ambiguities in the above are resolved greedily left-to-right.
 
 (defun xr--parse-skip-set-buffer (warnings)
+
   ;; An ad-hoc check, but one that catches lots of mistakes.
   (when (and (looking-at (rx "[" (one-or-more anything) "]" eos))
              (not (looking-at (rx "[:" (one-or-more anything) ":]" eos))))
     (xr--report warnings (point) "Suspect skip set framed in `[...]'"))
+
   (let ((negated (looking-at (rx "^")))
         (ranges nil)
         (classes nil))
@@ -634,6 +673,11 @@
                                 lower multibyte nonascii print punct space
                                 unibyte upper word xdigit))
             (error "No character class `%s'" (match-string 0)))
+          ;; Another useful ad-hoc check.
+          (when (and (eq (char-before) ?\[)
+                     (eq (char-after (match-end 0)) ?\]))
+            (xr--report warnings (1- (point))
+                        "Suspect character class framed in `[...]'"))
           (when (memq sym classes)
             (xr--report warnings (point)
                         (format "Duplicated character class `%s'"
@@ -863,13 +907,9 @@ in SKIP-SET-STRING."
     (xr--parse-skip-set skip-set-string warnings)
     (sort (car warnings) #'car-less-than-car)))
 
-;; Escape non-printing characters in a string for maximum readability.
-;; If ESCAPE-PRINTABLE, also escape \ and ", otherwise don't.
 (defun xr--escape-string (string escape-printable)
-  ;; Translate control and raw chars to escape sequences for readability.
-  ;; We prefer hex escapes (\xHH) since that is usually what the user wants,
-  ;; but use octal (\OOO) if a legitimate hex digit follows, as
-  ;; hex escapes are not limited to two digits.
+  "Escape non-printing characters in a string for maximum readability.
+If ESCAPE-PRINTABLE, also escape \\ and \", otherwise don't."
   (replace-regexp-in-string
    "[\x00-\x1f\"\\\x7f\x80-\xff][[:xdigit:]]?"
    (lambda (s)
@@ -883,6 +923,9 @@ in SKIP-SET-STRING."
                             (?\f . "\\f")
                             (?\r . "\\r")
                             (?\e . "\\e")))))
+       ;; We prefer hex escapes (\xHH) because that is what most users
+       ;; want today, but use octal (\OOO) if the following character
+       ;; is a legitimate hex digit.
        (concat
         (cond (transl (cdr transl))
               ((memq c '(?\\ ?\"))
