@@ -3,7 +3,7 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.10
+;; Version: 1.11
 ;; URL: https://github.com/mattiase/xr
 ;; Keywords: lisp, maint, regexps
 
@@ -80,6 +80,10 @@
 
 ;;; News:
 
+;; Version 1.11:
+;; - Warn about repetition of empty-matching expressions
+;; - Detect `-' not first or last in char alternatives or skip-sets
+;; - Stronger ad-hoc [...] check in skip-sets
 ;; Version 1.10:
 ;; - Warn about [[:class:]] in skip-sets
 ;; - Warn about two-character ranges like [*-+] in regexps
@@ -107,14 +111,16 @@
 ;;; Code:
 
 (require 'rx)
+(require 'cl-lib)
 
-;; Add the report MESSAGE at POSITION to WARNINGS.
 (defun xr--report (warnings position message)
+  "Add the report MESSAGE at POSITION to WARNINGS."
   (when warnings
     (push (cons (1- position) message) (car warnings))))
 
 (defun xr--parse-char-alt (negated warnings)
-  (let ((intervals nil)
+  (let ((start-pos (point))
+        (intervals nil)
         (classes nil))
     (cond
      ;; Initial ]-x range
@@ -190,6 +196,11 @@
                                (eq (aref (car (last intervals)) 0) ?\]))))
             (xr--report warnings (point)
                         "Suspect `[' in char alternative"))
+          (when (and (looking-at (rx "-" (not (any "]"))))
+                     (> (point) start-pos))
+            (xr--report
+             warnings (point)
+             "Literal `-' not first or last in character alternative"))
           (push (vector ch ch (point)) intervals))
         (forward-char 1))))
 
@@ -293,9 +304,9 @@
                 (list 'not set)
               set))))))))
 
-;; Reverse a sequence, flatten any (seq ...) inside, and concatenate
-;; adjacent strings.
 (defun xr--rev-join-seq (sequence)
+  "Reverse a sequence, flatten any (seq ...) inside, and concatenate
+adjacent strings."
   (let ((result nil))
     (while sequence
       (let ((elem (car sequence))
@@ -403,9 +414,9 @@
                  (list operand))))
     (cons sym body)))
 
-;; Apply a repetition of {LOWER,UPPER} to OPERAND.
-;; UPPER may be nil, meaning infinity.
 (defun xr--repeat (lower upper operand)
+  "Apply a repetition of {LOWER,UPPER} to OPERAND.
+UPPER may be nil, meaning infinity."
   (when (and upper (> lower upper))
     (error "Invalid repetition interval"))
   ;; rx does not accept (= 0 ...) or (>= 0 ...), so we use 
@@ -426,6 +437,28 @@
                  (list operand))))
     (append operator body)))
   
+(defconst xr--zero-width-assertions
+  '(bol eol bos eos bow eow word-boundary not-word-boundary
+    symbol-start symbol-end point))
+
+(defun xr--matches-empty-p (rx)
+  "Whether RX can match the empty string regardless of context."
+  (pcase rx
+    (`(,(or `seq `one-or-more `group) . ,body)
+     (cl-every #'xr--matches-empty-p body))
+    (`(or . ,body)
+     (cl-some #'xr--matches-empty-p body))
+    (`(group-n ,_ . ,body)
+     (cl-every #'xr--matches-empty-p body))
+    (`(,(or `opt `zero-or-more) . ,_)
+     t)
+    (`(repeat ,from ,_ . ,body)
+     (or (= from 0)
+         (cl-every #'xr--matches-empty-p body)))
+    (`(,(or `= `>=) ,_ . ,body)
+     (cl-every #'xr--matches-empty-p body))
+    ("" t)))
+
 (defun xr--parse-seq (warnings)
   (let ((sequence nil))                 ; reversed
     (while (not (looking-at (rx (or "\\|" "\\)" eos))))
@@ -452,11 +485,23 @@
         (if (and sequence
                  (not (and (eq (car sequence) 'bol) (eq (preceding-char) ?^))))
             (let ((operator (match-string 0)))
-              (when (and (consp (car sequence))
-                         (memq (caar sequence)
-                               '(opt zero-or-more one-or-more +? *? ??)))
-                (xr--report warnings (match-beginning 0)
-                            "Repetition of repetition"))
+              (when warnings
+                (cond
+                 ((and (consp (car sequence))
+                       (memq (caar sequence)
+                             '(opt zero-or-more one-or-more +? *? ??)))
+                  (xr--report warnings (match-beginning 0)
+                              "Repetition of repetition"))
+                 ((memq (car sequence) xr--zero-width-assertions)
+                  (xr--report warnings (match-beginning 0)
+                              "Repetition of zero-width assertion"))
+                 ((and (xr--matches-empty-p (car sequence))
+                       ;; Rejecting repetition of the empty string
+                       ;; suppresses some false positives.
+                       (not (equal (car sequence) "")))
+                  (xr--report
+                   warnings (match-beginning 0)
+                   "Repetition of expression matching an empty string"))))
               (goto-char (match-end 0))
               (setq sequence (cons (xr--postfix operator (car sequence))
                                    (cdr sequence))))
@@ -471,11 +516,22 @@
              sequence
              (not (and (eq (car sequence) 'bol) (eq (preceding-char) ?^))))
         (forward-char 2)
-        (when (and (consp (car sequence))
-                   (memq (caar sequence)
-                         '(opt zero-or-more one-or-more +? *? ??)))
-          (xr--report warnings (match-beginning 0)
-                      "Repetition of repetition"))
+        (when warnings
+          (cond
+           ((and (consp (car sequence))
+                 (memq (caar sequence)
+                       '(opt zero-or-more one-or-more +? *? ??)))
+            (xr--report warnings (match-beginning 0)
+                        "Repetition of repetition"))
+           ((memq (car sequence) xr--zero-width-assertions)
+            (xr--report warnings (match-beginning 0)
+                        "Repetition of zero-width assertion"))
+           ((and (xr--matches-empty-p (car sequence))
+                 ;; Rejecting repetition of the empty string
+                 ;; suppresses some false positives.
+                 (not (equal (car sequence) "")))
+            (xr--report warnings (match-beginning 0)
+                        "Repetition of expression matching an empty string"))))
         (if (looking-at (rx (opt (group (one-or-more digit)))
                             (opt (group ",")
                                  (opt (group (one-or-more digit))))
@@ -655,15 +711,20 @@
 (defun xr--parse-skip-set-buffer (warnings)
 
   ;; An ad-hoc check, but one that catches lots of mistakes.
-  (when (and (looking-at (rx "[" (one-or-more anything) "]" eos))
+  (when (and (looking-at (rx "[" (one-or-more anything) "]"
+                             (opt (any "+" "*" "?")
+                                  (opt "?"))
+                             eos))
              (not (looking-at (rx "[:" (one-or-more anything) ":]" eos))))
     (xr--report warnings (point) "Suspect skip set framed in `[...]'"))
 
   (let ((negated (looking-at (rx "^")))
+        (start-pos (point))
         (ranges nil)
         (classes nil))
     (when negated
-      (forward-char 1))
+      (forward-char 1)
+      (setq start-pos (point)))
     (while (not (eobp))
       (cond
        ((looking-at (rx "[:" (group (*? anything)) ":]"))
@@ -705,6 +766,12 @@
             (xr--report warnings (1- (match-beginning 3))
                         (xr--escape-string
                          (format "Unnecessarily escaped `%c'" end) nil)))
+          (when (and (eq start ?-)
+                     (not end)
+                     (match-beginning 2)
+                     (< start-pos (point) (1- (point-max))))
+            (xr--report warnings (point)
+                        "Literal `-' not first or last"))
           (if (and end (> start end))
               (xr--report warnings (point)
                           (xr--escape-string
@@ -812,9 +879,9 @@
     (goto-char (point-min))
     (xr--parse-skip-set-buffer warnings)))
 
-;; Substitute keywords in RX using HEAD-ALIST and BODY-ALIST in the
-;; head and body positions, respectively.
 (defun xr--substitute-keywords (head-alist body-alist rx)
+  "Substitute keywords in RX using HEAD-ALIST and BODY-ALIST in the
+head and body positions, respectively."
   (cond
    ((symbolp rx)
     (or (cdr (assq rx body-alist)) rx))
@@ -826,9 +893,6 @@
                   (cdr rx))))
    (t rx)))
 
-;; Alist mapping keyword dialect to (HEAD-ALIST . BODY-ALIST),
-;; or to nil if no translation should take place.
-;; The alists are mapping from the default choice.
 (defconst xr--keywords
   '((medium . nil)
     (brief . (((zero-or-more . 0+)
@@ -850,7 +914,10 @@
                  (bos  . string-start)
                  (eos  . string-end)
                  (bow  . word-start)
-                 (eow  . word-end))))))
+                 (eow  . word-end)))))
+  "Alist mapping keyword dialect to (HEAD-ALIST . BODY-ALIST),
+or to nil if no translation should take place.
+The alists are mapping from the default choice.")
 
 (defun xr--in-dialect (rx dialect)
   (let ((keywords (assq (or dialect 'medium) xr--keywords)))
@@ -935,8 +1002,8 @@ If ESCAPE-PRINTABLE, also escape \\ and \", otherwise don't."
         xdigit)))
    string 'fixedcase 'literal))
 
-;; Print a rx expression to a string, unformatted.
 (defun xr--rx-to-string (rx)
+  "Print a rx expression to a string, unformatted."
   (cond
    ((eq rx '*?) "*?")                   ; Avoid unnecessary \ in symbol.
    ((eq rx '+?) "+?")
