@@ -3,7 +3,7 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.12
+;; Version: 1.13
 ;; URL: https://github.com/mattiase/xr
 ;; Keywords: lisp, maint, regexps
 
@@ -80,6 +80,9 @@
 
 ;;; News:
 
+;; Version 1.13:
+;; - More robust pretty-printing, especially for characters
+;; - Generate (category CHAR) for unknown categories
 ;; Version 1.12:
 ;; - Warn about branch subsumption, like [AB]\|A
 ;; Version 1.11:
@@ -323,54 +326,52 @@ adjacent strings."
     result))
 
 (defun xr--char-category (negated category-code)
-  (let ((sym (assq category-code
-                   '((?\s . space-for-indent)
-                     (?. . base)
-                     (?0 . consonant)
-                     (?1 . base-vowel)                        
-                     (?2 . upper-diacritical-mark)            
-                     (?3 . lower-diacritical-mark)            
-                     (?4 . tone-mark)                 
-                     (?5 . symbol)                            
-                     (?6 . digit)                             
-                     (?7 . vowel-modifying-diacritical-mark)  
-                     (?8 . vowel-sign)                        
-                     (?9 . semivowel-lower)                   
-                     (?< . not-at-end-of-line)                
-                     (?> . not-at-beginning-of-line)          
-                     (?A . alpha-numeric-two-byte)            
-                     (?C . chinese-two-byte)                  
-                     (?G . greek-two-byte)                    
-                     (?H . japanese-hiragana-two-byte)        
-                     (?I . indian-two-byte)                   
-                     (?K . japanese-katakana-two-byte)        
-                     (?L . strong-left-to-right)
-                     (?N . korean-hangul-two-byte)            
-                     (?R . strong-right-to-left)
-                     (?Y . cyrillic-two-byte)         
-                     (?^ . combining-diacritic)               
-                     (?a . ascii)                             
-                     (?b . arabic)                            
-                     (?c . chinese)                           
-                     (?e . ethiopic)                          
-                     (?g . greek)                             
-                     (?h . korean)                            
-                     (?i . indian)                            
-                     (?j . japanese)                          
-                     (?k . japanese-katakana)         
-                     (?l . latin)                             
-                     (?o . lao)                               
-                     (?q . tibetan)                           
-                     (?r . japanese-roman)                    
-                     (?t . thai)                              
-                     (?v . vietnamese)                        
-                     (?w . hebrew)                            
-                     (?y . cyrillic)                          
-                     (?| . can-break)))))
-    (if sym
-        (let ((item (list 'category (cdr sym))))
-          (if negated (list 'not item) item))
-      (list 'regexp (format "\\%c%c" (if negated ?C ?c) category-code)))))
+  (let* ((sym (assq category-code
+                    '((?\s . space-for-indent)
+                      (?. . base)
+                      (?0 . consonant)
+                      (?1 . base-vowel)                        
+                      (?2 . upper-diacritical-mark)            
+                      (?3 . lower-diacritical-mark)            
+                      (?4 . tone-mark)                 
+                      (?5 . symbol)                            
+                      (?6 . digit)                             
+                      (?7 . vowel-modifying-diacritical-mark)  
+                      (?8 . vowel-sign)                        
+                      (?9 . semivowel-lower)                   
+                      (?< . not-at-end-of-line)                
+                      (?> . not-at-beginning-of-line)          
+                      (?A . alpha-numeric-two-byte)            
+                      (?C . chinese-two-byte)                  
+                      (?G . greek-two-byte)                    
+                      (?H . japanese-hiragana-two-byte)        
+                      (?I . indian-two-byte)                   
+                      (?K . japanese-katakana-two-byte)        
+                      (?L . strong-left-to-right)
+                      (?N . korean-hangul-two-byte)            
+                      (?R . strong-right-to-left)
+                      (?Y . cyrillic-two-byte)         
+                      (?^ . combining-diacritic)               
+                      (?a . ascii)                             
+                      (?b . arabic)                            
+                      (?c . chinese)                           
+                      (?e . ethiopic)                          
+                      (?g . greek)                             
+                      (?h . korean)                            
+                      (?i . indian)                            
+                      (?j . japanese)                          
+                      (?k . japanese-katakana)         
+                      (?l . latin)                             
+                      (?o . lao)                               
+                      (?q . tibetan)                           
+                      (?r . japanese-roman)                    
+                      (?t . thai)                              
+                      (?v . vietnamese)                        
+                      (?w . hebrew)                            
+                      (?y . cyrillic)                          
+                      (?| . can-break))))
+         (item (list 'category (if sym (cdr sym) category-code))))
+    (if negated (list 'not item) item)))
 
 (defun xr--char-syntax (negated syntax-code)
   (let ((sym (assq syntax-code
@@ -445,18 +446,18 @@ UPPER may be nil, meaning infinity."
 (defun xr--matches-empty-p (rx)
   "Whether RX can match the empty string regardless of context."
   (pcase rx
-    (`(,(or `seq `one-or-more `group) . ,body)
+    (`(,(or 'seq 'one-or-more 'group) . ,body)
      (cl-every #'xr--matches-empty-p body))
     (`(or . ,body)
      (cl-some #'xr--matches-empty-p body))
     (`(group-n ,_ . ,body)
      (cl-every #'xr--matches-empty-p body))
-    (`(,(or `opt `zero-or-more) . ,_)
+    (`(,(or 'opt 'zero-or-more) . ,_)
      t)
     (`(repeat ,from ,_ . ,body)
      (or (= from 0)
          (cl-every #'xr--matches-empty-p body)))
-    (`(,(or `= `>=) ,_ . ,body)
+    (`(,(or '= '>=) ,_ . ,body)
      (cl-every #'xr--matches-empty-p body))
     ("" t)))
 
@@ -485,26 +486,27 @@ UPPER may be nil, meaning infinity."
        ((looking-at (rx (group (any "*?+")) (opt "?")))
         (if (and sequence
                  (not (and (eq (car sequence) 'bol) (eq (preceding-char) ?^))))
-            (let ((operator (match-string 0)))
+            (let ((operator (match-string 0))
+                  (operand (car sequence)))
               (when warnings
                 (cond
-                 ((and (consp (car sequence))
-                       (memq (caar sequence)
+                 ((and (consp operand)
+                       (memq (car operand)
                              '(opt zero-or-more one-or-more +? *? ??)))
                   (xr--report warnings (match-beginning 0)
                               "Repetition of repetition"))
-                 ((memq (car sequence) xr--zero-width-assertions)
+                 ((memq operand xr--zero-width-assertions)
                   (xr--report warnings (match-beginning 0)
                               "Repetition of zero-width assertion"))
-                 ((and (xr--matches-empty-p (car sequence))
+                 ((and (xr--matches-empty-p operand)
                        ;; Rejecting repetition of the empty string
                        ;; suppresses some false positives.
-                       (not (equal (car sequence) "")))
+                       (not (equal operand "")))
                   (xr--report
                    warnings (match-beginning 0)
                    "Repetition of expression matching an empty string"))))
               (goto-char (match-end 0))
-              (setq sequence (cons (xr--postfix operator (car sequence))
+              (setq sequence (cons (xr--postfix operator operand)
                                    (cdr sequence))))
           (let ((literal (match-string 1)))
             (goto-char (match-end 1))
@@ -517,44 +519,45 @@ UPPER may be nil, meaning infinity."
              sequence
              (not (and (eq (car sequence) 'bol) (eq (preceding-char) ?^))))
         (forward-char 2)
-        (when warnings
-          (cond
-           ((and (consp (car sequence))
-                 (memq (caar sequence)
-                       '(opt zero-or-more one-or-more +? *? ??)))
-            (xr--report warnings (match-beginning 0)
-                        "Repetition of repetition"))
-           ((memq (car sequence) xr--zero-width-assertions)
-            (xr--report warnings (match-beginning 0)
-                        "Repetition of zero-width assertion"))
-           ((and (xr--matches-empty-p (car sequence))
-                 ;; Rejecting repetition of the empty string
-                 ;; suppresses some false positives.
-                 (not (equal (car sequence) "")))
-            (xr--report warnings (match-beginning 0)
-                        "Repetition of expression matching an empty string"))))
-        (if (looking-at (rx (opt (group (one-or-more digit)))
-                            (opt (group ",")
-                                 (opt (group (one-or-more digit))))
-                            "\\}"))
-            (let ((lower (if (match-string 1)
-                             (string-to-number (match-string 1))
-                           0))
-                  (comma (match-string 2))
-                  (upper (and (match-string 3)
-                              (string-to-number (match-string 3)))))
-              (unless (or (match-beginning 1) (match-string 3))
-                (xr--report warnings (- (match-beginning 0) 2)
-                            (if comma
-                                "Uncounted repetition"
+        (let ((operand (car sequence)))
+          (when warnings
+            (cond
+             ((and (consp operand)
+                   (memq (car operand)
+                         '(opt zero-or-more one-or-more +? *? ??)))
+              (xr--report warnings (match-beginning 0)
+                          "Repetition of repetition"))
+             ((memq operand xr--zero-width-assertions)
+              (xr--report warnings (match-beginning 0)
+                          "Repetition of zero-width assertion"))
+             ((and (xr--matches-empty-p operand)
+                   ;; Rejecting repetition of the empty string
+                   ;; suppresses some false positives.
+                   (not (equal operand "")))
+              (xr--report
+               warnings (match-beginning 0)
+               "Repetition of expression matching an empty string"))))
+          (if (looking-at (rx (opt (group (one-or-more digit)))
+                              (opt (group ",")
+                                   (opt (group (one-or-more digit))))
+                              "\\}"))
+              (let ((lower (if (match-string 1)
+                               (string-to-number (match-string 1))
+                             0))
+                    (comma (match-string 2))
+                    (upper (and (match-string 3)
+                                (string-to-number (match-string 3)))))
+                (unless (or (match-beginning 1) (match-string 3))
+                  (xr--report warnings (- (match-beginning 0) 2)
+                              (if comma
+                                  "Uncounted repetition"
                                 "Implicit zero repetition")))
-              (goto-char (match-end 0))
-              (setq sequence (cons (xr--repeat
-                                    lower
-                                    (if comma upper lower)
-                                    (car sequence))
-                                   (cdr sequence))))
-          (error "Invalid \\{\\} syntax")))
+                (goto-char (match-end 0))
+                (setq sequence (cons (xr--repeat lower
+                                                 (if comma upper lower)
+                                                 operand)
+                                     (cdr sequence))))
+            (error "Invalid \\{\\} syntax"))))
 
        ;; nonspecial character
        ((looking-at (rx (not (any "\\.["))))
@@ -1230,22 +1233,70 @@ If ESCAPE-PRINTABLE, also escape \\ and \", otherwise don't."
         xdigit)))
    string 'fixedcase 'literal))
 
+(defun xr--take (n list)
+  "The N first elements of LIST."
+  (butlast list (- (length list) n)))
+
+(defun xr--rx-list-to-string (rx plain-prefix)
+  "Print the list `rx' to a string, unformatted.
+The first PLAIN-PREFIX elements are formatted using `prin1-to-string';
+the rest with `xr--rx-to-string'."
+  (concat "("
+          (mapconcat #'identity
+                     (append
+                      (mapcar #'prin1-to-string (xr--take plain-prefix rx))
+                      (mapcar #'xr--rx-to-string (nthcdr plain-prefix rx)))
+                     " ")
+          ")"))
+
 (defun xr--rx-to-string (rx)
-  "Print a rx expression to a string, unformatted."
+  "Print an rx expression to a string, unformatted."
   (cond
    ((eq rx '*?) "*?")                   ; Avoid unnecessary \ in symbol.
    ((eq rx '+?) "+?")
-   ((consp rx)
-    ;; Render the characters SPC and ? as ? and ?? when first in a list.
-    ;; Elsewhere, they are just integers.
-    (let ((first (cond ((eq (car rx) ?\s) "?")
-                       ((eq (car rx) ??) "??")
-                       (t (xr--rx-to-string (car rx)))))
+   ((eq rx '\??) "\\??")
+   ((stringp rx) (concat "\"" (xr--escape-string rx t) "\""))
+   ((characterp rx)
+    (let ((esc (assq rx '((?\( . ?\()
+                          (?\) . ?\))
+                          (?\[ . ?\[)
+                          (?\] . ?\])
+                          (?\\ . ?\\)
+                          (?\; . ?\;)
+                          (?\" . ?\")
+                          (?\s . ?s)
+                          (?\n . ?n)
+                          (?\r . ?r)
+                          (?\t . ?t)
+                          (?\e . ?e)
+                          (?\b . ?b)
+                          (?\f . ?f)
+                          (?\v . ?v)))))
+      (cond (esc (format "?\\%c" (cdr esc)))
+            ;; Only base characters are displayed as ?char; this excludes
+            ;; controls, combining, surrogates, noncharacters etc.
+            ((aref (char-category-set rx) ?.) (format "?%c" rx))
+            (t (format "#x%02x" rx)))))
+   ((atom rx) (prin1-to-string rx))
+   ((nlistp (cdr rx))
+    (format "(%s . %s)"
+            (xr--rx-to-string (car rx))
+            (xr--rx-to-string (cdr rx))))
+   ((or (eq (car rx) '**)
+        (and (eq (car rx) 'repeat) (> (length rx) 3)))
+    ;; First 2 args are integers.
+    (xr--rx-list-to-string rx 3))
+   ((memq (car rx) '(= >= repeat group-n backref))
+    ;; First arg is integer.
+    (xr--rx-list-to-string rx 2))
+   (t
+    ;; Render the space character as ? when first in a list.
+    ;; Elsewhere, it's a character or integer.
+    (let ((first (if (eq (car rx) ?\s)
+                     "?"
+                   (xr--rx-to-string (car rx))))
           (rest (mapcar #'xr--rx-to-string (cdr rx))))
-      (concat "(" (mapconcat #'identity (cons first rest) " ") ")")))
-   ((stringp rx)
-    (concat "\"" (xr--escape-string rx t) "\""))
-   (t (prin1-to-string rx))))
+      (concat "(" (mapconcat #'identity (cons first rest) " ") ")")))))
 
 (defun xr-pp-rx-to-str (rx)
   "Pretty-print the regexp RX (in rx notation) to a string.
@@ -1258,10 +1309,8 @@ It does a slightly better job than standard `pp' for rx purposes."
     ;; readability and compactness.
     (goto-char (point-min))
     (while (re-search-forward
-            (rx "("
-                (or "not" "0+" "1+" "*" "+" "?" "opt" "seq" ":" "|" "or"
-                    "??" "*?" "+?" "=" ">=" "**")
-                (group "\n" (zero-or-more (any space))))
+            (rx "(" (** 1 4 (any "a-z0-9" "+?:|*=>"))
+                (group "\n" (zero-or-more blank)))
             nil t)
       (replace-match " " t t nil 1))
     
