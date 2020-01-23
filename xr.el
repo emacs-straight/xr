@@ -3,7 +3,7 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.13
+;; Version: 1.14
 ;; URL: https://github.com/mattiase/xr
 ;; Keywords: lisp, maint, regexps
 
@@ -80,6 +80,8 @@
 
 ;;; News:
 
+;; Version 1.14:
+;; - Warn about repetition of grouped repetition
 ;; Version 1.13:
 ;; - More robust pretty-printing, especially for characters
 ;; - Generate (category CHAR) for unknown categories
@@ -490,9 +492,25 @@ UPPER may be nil, meaning infinity."
                   (operand (car sequence)))
               (when warnings
                 (cond
+                 ;; (* (* X)), for any repetitions *
                  ((and (consp operand)
                        (memq (car operand)
                              '(opt zero-or-more one-or-more +? *? ??)))
+                  (xr--report warnings (match-beginning 0)
+                              "Repetition of repetition"))
+                 ;; (* (group (* X))), for any repetitions *
+                 ((and (consp operand)
+                       (eq (car operand) 'group)
+                       (null (cddr operand))
+                       (let ((inner (cadr operand)))
+                         (and (consp inner)
+                              (memq (car inner)
+                                    '(opt zero-or-more one-or-more +? *? ??))
+                              ;; Except (? (group (+ X))), since that may
+                              ;; be legitimate.
+                              (not (and (equal operator "?")
+                                        (memq (car inner)
+                                              '(one-or-more +?)))))))
                   (xr--report warnings (match-beginning 0)
                               "Repetition of repetition"))
                  ((memq operand xr--zero-width-assertions)
@@ -522,9 +540,20 @@ UPPER may be nil, meaning infinity."
         (let ((operand (car sequence)))
           (when warnings
             (cond
+             ;; (** N M (* X)), for any repetition *
              ((and (consp operand)
                    (memq (car operand)
                          '(opt zero-or-more one-or-more +? *? ??)))
+              (xr--report warnings (match-beginning 0)
+                          "Repetition of repetition"))
+             ;; (** N M (group (* X))), for any repetition *
+             ((and (consp operand)
+                   (eq (car operand) 'group)
+                   (null (cddr operand))
+                   (let ((inner (cadr operand)))
+                     (and (consp inner)
+                          (memq (car inner)
+                                '(opt zero-or-more one-or-more +? *? ??)))))
               (xr--report warnings (match-beginning 0)
                           "Repetition of repetition"))
              ((memq operand xr--zero-width-assertions)
