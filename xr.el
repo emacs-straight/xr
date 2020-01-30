@@ -3,9 +3,10 @@
 ;; Copyright (C) 2019 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.14
+;; Version: 1.15
+;; Package-Requires: ((emacs "26.1"))
 ;; URL: https://github.com/mattiase/xr
-;; Keywords: lisp, maint, regexps
+;; Keywords: lisp, regexps
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -80,6 +81,8 @@
 
 ;;; News:
 
+;; Version 1.15:
+;; - Warn about subsuming repetitions in sequence, like [AB]+A*
 ;; Version 1.14:
 ;; - Warn about repetition of grouped repetition
 ;; Version 1.13:
@@ -466,231 +469,267 @@ UPPER may be nil, meaning infinity."
 (defun xr--parse-seq (warnings)
   (let ((sequence nil))                 ; reversed
     (while (not (looking-at (rx (or "\\|" "\\)" eos))))
-      (cond
-       ;; ^ - only special at beginning of sequence
-       ((looking-at (rx "^"))
-        (forward-char 1)
-        (if (null sequence)
-            (push 'bol sequence)
-          (xr--report warnings (match-beginning 0) "Unescaped literal `^'")
-          (push "^" sequence)))
+      (let ((item-start (point)))
+        (cond
+         ;; ^ - only special at beginning of sequence
+         ((looking-at (rx "^"))
+          (forward-char 1)
+          (if (null sequence)
+              (push 'bol sequence)
+            (xr--report warnings (match-beginning 0) "Unescaped literal `^'")
+            (push "^" sequence)))
 
-       ;; $ - only special at end of sequence
-       ((looking-at (rx "$"))
-        (forward-char 1)
-        (if (looking-at (rx (or "\\|" "\\)" eos)))
-            (push 'eol sequence)
-          (xr--report warnings (match-beginning 0) "Unescaped literal `$'")
-          (push "$" sequence)))
+         ;; $ - only special at end of sequence
+         ((looking-at (rx "$"))
+          (forward-char 1)
+          (if (looking-at (rx (or "\\|" "\\)" eos)))
+              (push 'eol sequence)
+            (xr--report warnings (match-beginning 0) "Unescaped literal `$'")
+            (push "$" sequence)))
 
-       ;; * ? + (and non-greedy variants)
-       ;; - not special at beginning of sequence or after ^
-       ((looking-at (rx (group (any "*?+")) (opt "?")))
-        (if (and sequence
-                 (not (and (eq (car sequence) 'bol) (eq (preceding-char) ?^))))
-            (let ((operator (match-string 0))
-                  (operand (car sequence)))
-              (when warnings
-                (cond
-                 ;; (* (* X)), for any repetitions *
-                 ((and (consp operand)
-                       (memq (car operand)
-                             '(opt zero-or-more one-or-more +? *? ??)))
-                  (xr--report warnings (match-beginning 0)
-                              "Repetition of repetition"))
-                 ;; (* (group (* X))), for any repetitions *
-                 ((and (consp operand)
-                       (eq (car operand) 'group)
-                       (null (cddr operand))
-                       (let ((inner (cadr operand)))
-                         (and (consp inner)
-                              (memq (car inner)
-                                    '(opt zero-or-more one-or-more +? *? ??))
-                              ;; Except (? (group (+ X))), since that may
-                              ;; be legitimate.
-                              (not (and (equal operator "?")
-                                        (memq (car inner)
-                                              '(one-or-more +?)))))))
-                  (xr--report warnings (match-beginning 0)
-                              "Repetition of repetition"))
-                 ((memq operand xr--zero-width-assertions)
-                  (xr--report warnings (match-beginning 0)
-                              "Repetition of zero-width assertion"))
-                 ((and (xr--matches-empty-p operand)
-                       ;; Rejecting repetition of the empty string
-                       ;; suppresses some false positives.
-                       (not (equal operand "")))
-                  (xr--report
-                   warnings (match-beginning 0)
-                   "Repetition of expression matching an empty string"))))
-              (goto-char (match-end 0))
-              (setq sequence (cons (xr--postfix operator operand)
-                                   (cdr sequence))))
-          (let ((literal (match-string 1)))
-            (goto-char (match-end 1))
-            (xr--report warnings (match-beginning 0)
-                        (format "Unescaped literal `%s'" literal))
-            (push literal sequence))))
-
-       ;; \{..\} - not special at beginning of sequence or after ^
-       ((and (looking-at (rx "\\{"))
-             sequence
-             (not (and (eq (car sequence) 'bol) (eq (preceding-char) ?^))))
-        (forward-char 2)
-        (let ((operand (car sequence)))
-          (when warnings
-            (cond
-             ;; (** N M (* X)), for any repetition *
-             ((and (consp operand)
-                   (memq (car operand)
-                         '(opt zero-or-more one-or-more +? *? ??)))
-              (xr--report warnings (match-beginning 0)
-                          "Repetition of repetition"))
-             ;; (** N M (group (* X))), for any repetition *
-             ((and (consp operand)
-                   (eq (car operand) 'group)
-                   (null (cddr operand))
-                   (let ((inner (cadr operand)))
-                     (and (consp inner)
-                          (memq (car inner)
-                                '(opt zero-or-more one-or-more +? *? ??)))))
-              (xr--report warnings (match-beginning 0)
-                          "Repetition of repetition"))
-             ((memq operand xr--zero-width-assertions)
-              (xr--report warnings (match-beginning 0)
-                          "Repetition of zero-width assertion"))
-             ((and (xr--matches-empty-p operand)
-                   ;; Rejecting repetition of the empty string
-                   ;; suppresses some false positives.
-                   (not (equal operand "")))
-              (xr--report
-               warnings (match-beginning 0)
-               "Repetition of expression matching an empty string"))))
-          (if (looking-at (rx (opt (group (one-or-more digit)))
-                              (opt (group ",")
-                                   (opt (group (one-or-more digit))))
-                              "\\}"))
-              (let ((lower (if (match-string 1)
-                               (string-to-number (match-string 1))
-                             0))
-                    (comma (match-string 2))
-                    (upper (and (match-string 3)
-                                (string-to-number (match-string 3)))))
-                (unless (or (match-beginning 1) (match-string 3))
-                  (xr--report warnings (- (match-beginning 0) 2)
-                              (if comma
-                                  "Uncounted repetition"
-                                "Implicit zero repetition")))
+         ;; * ? + (and non-greedy variants)
+         ;; - not special at beginning of sequence or after ^
+         ((looking-at (rx (group (any "*?+")) (opt "?")))
+          (if (and sequence
+                   (not (and (eq (car sequence) 'bol)
+                             (eq (preceding-char) ?^))))
+              (let ((operator (match-string 0))
+                    (operand (car sequence)))
+                (when warnings
+                  (cond
+                   ;; (* (* X)), for any repetitions *
+                   ((and (consp operand)
+                         (memq (car operand)
+                               '(opt zero-or-more one-or-more +? *? ??)))
+                    (xr--report warnings (match-beginning 0)
+                                "Repetition of repetition"))
+                   ;; (* (group (* X))), for any repetitions *
+                   ((and (consp operand)
+                         (eq (car operand) 'group)
+                         (null (cddr operand))
+                         (let ((inner (cadr operand)))
+                           (and (consp inner)
+                                (memq (car inner)
+                                      '(opt zero-or-more one-or-more +? *? ??))
+                                ;; Except (? (group (+ X))), since that may
+                                ;; be legitimate.
+                                (not (and (equal operator "?")
+                                          (memq (car inner)
+                                                '(one-or-more +?)))))))
+                    (xr--report warnings (match-beginning 0)
+                                "Repetition of repetition"))
+                   ((memq operand xr--zero-width-assertions)
+                    (xr--report warnings (match-beginning 0)
+                                "Repetition of zero-width assertion"))
+                   ((and (xr--matches-empty-p operand)
+                         ;; Rejecting repetition of the empty string
+                         ;; suppresses some false positives.
+                         (not (equal operand "")))
+                    (xr--report
+                     warnings (match-beginning 0)
+                     "Repetition of expression matching an empty string"))))
                 (goto-char (match-end 0))
-                (setq sequence (cons (xr--repeat lower
-                                                 (if comma upper lower)
-                                                 operand)
+                (setq sequence (cons (xr--postfix operator operand)
                                      (cdr sequence))))
-            (error "Invalid \\{\\} syntax"))))
+            (let ((literal (match-string 1)))
+              (goto-char (match-end 1))
+              (xr--report warnings (match-beginning 0)
+                          (format "Unescaped literal `%s'" literal))
+              (push literal sequence))))
 
-       ;; nonspecial character
-       ((looking-at (rx (not (any "\\.["))))
-        (forward-char 1)
-        (push (match-string 0) sequence))
+         ;; \{..\} - not special at beginning of sequence or after ^
+         ((and (looking-at (rx "\\{"))
+               sequence
+               (not (and (eq (car sequence) 'bol) (eq (preceding-char) ?^))))
+          (forward-char 2)
+          (let ((operand (car sequence)))
+            (when warnings
+              (cond
+               ;; (** N M (* X)), for any repetition *
+               ((and (consp operand)
+                     (memq (car operand)
+                           '(opt zero-or-more one-or-more +? *? ??)))
+                (xr--report warnings (match-beginning 0)
+                            "Repetition of repetition"))
+               ;; (** N M (group (* X))), for any repetition *
+               ((and (consp operand)
+                     (eq (car operand) 'group)
+                     (null (cddr operand))
+                     (let ((inner (cadr operand)))
+                       (and (consp inner)
+                            (memq (car inner)
+                                  '(opt zero-or-more one-or-more +? *? ??)))))
+                (xr--report warnings (match-beginning 0)
+                            "Repetition of repetition"))
+               ((memq operand xr--zero-width-assertions)
+                (xr--report warnings (match-beginning 0)
+                            "Repetition of zero-width assertion"))
+               ((and (xr--matches-empty-p operand)
+                     ;; Rejecting repetition of the empty string
+                     ;; suppresses some false positives.
+                     (not (equal operand "")))
+                (xr--report
+                 warnings (match-beginning 0)
+                 "Repetition of expression matching an empty string"))))
+            (if (looking-at (rx (opt (group (one-or-more digit)))
+                                (opt (group ",")
+                                     (opt (group (one-or-more digit))))
+                                "\\}"))
+                (let ((lower (if (match-string 1)
+                                 (string-to-number (match-string 1))
+                               0))
+                      (comma (match-string 2))
+                      (upper (and (match-string 3)
+                                  (string-to-number (match-string 3)))))
+                  (unless (or (match-beginning 1) (match-string 3))
+                    (xr--report warnings (- (match-beginning 0) 2)
+                                (if comma
+                                    "Uncounted repetition"
+                                  "Implicit zero repetition")))
+                  (goto-char (match-end 0))
+                  (setq sequence (cons (xr--repeat lower
+                                                   (if comma upper lower)
+                                                   operand)
+                                       (cdr sequence))))
+              (error "Invalid \\{\\} syntax"))))
 
-       ;; character alternative
-       ((looking-at (rx "[" (opt (group "^"))))
-        (goto-char (match-end 0))
-        (let ((negated (match-string 1)))
-          (push (xr--parse-char-alt negated warnings) sequence)))
+         ;; nonspecial character
+         ((looking-at (rx (not (any "\\.["))))
+          (forward-char 1)
+          (push (match-string 0) sequence))
 
-       ;; group
-       ((looking-at (rx "\\(" (opt (group "?")
-                                   (opt (opt (group (any "1-9")
-                                                    (zero-or-more digit)))
-                                        (group ":")))))
-        (let ((question (match-string 1))
-              (number (match-string 2))
-              (colon (match-string 3)))
-          (when (and question (not colon))
-            (error "Invalid \\(? syntax"))
+         ;; character alternative
+         ((looking-at (rx "[" (opt (group "^"))))
           (goto-char (match-end 0))
-          (let* ((group (xr--parse-alt warnings))
-                 ;; simplify - group has an implicit seq
-                 (operand (if (and (listp group) (eq (car group) 'seq))
-                              (cdr group)
-                            (list group))))
-            (when (not (looking-at (rx "\\)")))
-              (error "Missing \\)"))
-            (forward-char 2)
-            (let ((item (cond (number   ; numbered group
-                               (append (list 'group-n (string-to-number number))
-                                       operand))
-                              (question ; shy group
-                               group)
-                              (t        ; plain group
-                               (cons 'group operand)))))
-              (push item sequence)))))
+          (let ((negated (match-string 1)))
+            (push (xr--parse-char-alt negated warnings) sequence)))
 
-       ;; back-reference
-       ((looking-at (rx "\\" (group (any "1-9"))))
-        (forward-char 2)
-        (push (list 'backref (string-to-number (match-string 1)))
-              sequence))
+         ;; group
+         ((looking-at (rx "\\(" (opt (group "?")
+                                     (opt (opt (group (any "1-9")
+                                                      (zero-or-more digit)))
+                                          (group ":")))))
+          (let ((question (match-string 1))
+                (number (match-string 2))
+                (colon (match-string 3)))
+            (when (and question (not colon))
+              (error "Invalid \\(? syntax"))
+            (goto-char (match-end 0))
+            (let* ((group (xr--parse-alt warnings))
+                   ;; simplify - group has an implicit seq
+                   (operand (if (and (listp group) (eq (car group) 'seq))
+                                (cdr group)
+                              (list group))))
+              (when (not (looking-at (rx "\\)")))
+                (error "Missing \\)"))
+              (forward-char 2)
+              (let ((item (cond
+                           (number   ; numbered group
+                            (append (list 'group-n (string-to-number number))
+                                    operand))
+                           (question ; shy group
+                            group)
+                           (t        ; plain group
+                            (cons 'group operand)))))
+                (push item sequence)))))
 
-       ;; various simple substitutions
-       ((looking-at (rx (or "." "\\w" "\\W" "\\`" "\\'" "\\="
-                            "\\b" "\\B" "\\<" "\\>")))
-        (goto-char (match-end 0))
-        (let ((sym (cdr (assoc
-                         (match-string 0)
-                         '(("." . nonl)
-                           ("\\w" . wordchar) ("\\W" . not-wordchar)
-                           ("\\`" . bos) ("\\'" . eos)
-                           ("\\=" . point)
-                           ("\\b" . word-boundary) ("\\B" . not-word-boundary)
-                           ("\\<" . bow) ("\\>" . eow))))))
-          (push sym sequence)))
+         ;; back-reference
+         ((looking-at (rx "\\" (group (any "1-9"))))
+          (forward-char 2)
+          (push (list 'backref (string-to-number (match-string 1)))
+                sequence))
 
-       ;; symbol-start, symbol-end
-       ((looking-at (rx "\\_" (opt (group (any "<>")))))
-        (let ((arg (match-string 1)))
-          (unless arg
-            (error "Invalid \\_ sequence"))
-          (forward-char 3)
-          (push (if (string-equal arg "<") 'symbol-start 'symbol-end)
-                sequence)))
-
-       ;; character syntax
-       ((looking-at (rx "\\" (group (any "sS")) (opt (group anything))))
-        (let ((negated (string-equal (match-string 1) "S"))
-              (syntax-code (match-string 2)))
-          (unless syntax-code
-            (error "Incomplete \\%s sequence" (match-string 1)))
+         ;; various simple substitutions
+         ((looking-at (rx (or "." "\\w" "\\W" "\\`" "\\'" "\\="
+                              "\\b" "\\B" "\\<" "\\>")))
           (goto-char (match-end 0))
-          (push (xr--char-syntax negated (string-to-char syntax-code))
-                sequence)))
+          (let ((sym (cdr (assoc
+                           (match-string 0)
+                           '(("." . nonl)
+                             ("\\w" . wordchar) ("\\W" . not-wordchar)
+                             ("\\`" . bos) ("\\'" . eos)
+                             ("\\=" . point)
+                             ("\\b" . word-boundary) ("\\B" . not-word-boundary)
+                             ("\\<" . bow) ("\\>" . eow))))))
+            (push sym sequence)))
 
-       ;; character categories
-       ((looking-at (rx "\\" (group (any "cC")) (opt (group anything))))
-        (let ((negated (string-equal (match-string 1) "C"))
-              (category-code (match-string 2)))
-          (unless category-code
-            (error "Incomplete \\%s sequence" (match-string 1)))
-          (goto-char (match-end 0))
-          (push (xr--char-category negated (string-to-char category-code))
-                sequence)))
+         ;; symbol-start, symbol-end
+         ((looking-at (rx "\\_" (opt (group (any "<>")))))
+          (let ((arg (match-string 1)))
+            (unless arg
+              (error "Invalid \\_ sequence"))
+            (forward-char 3)
+            (push (if (string-equal arg "<") 'symbol-start 'symbol-end)
+                  sequence)))
 
-       ;; Escaped character. Only \*+?.^$[ really need escaping, but we accept
-       ;; any not otherwise handled character after the backslash since
-       ;; such sequences are found in the wild.
-       ((looking-at (rx "\\" (group (or (any "\\*+?.^$[]")
-                                        (group anything)))))
-        (forward-char 2)
-        (push (match-string 1) sequence)
-        (when (match-beginning 2)
-          ;; Note that we do not warn about \\], since the symmetry with \\[
-          ;; makes it unlikely to be a serious error.
-          (xr--report warnings (match-beginning 0)
-                      (format "Escaped non-special character `%s'"
-                              (xr--escape-string (match-string 2) nil)))))
+         ;; character syntax
+         ((looking-at (rx "\\" (group (any "sS")) (opt (group anything))))
+          (let ((negated (string-equal (match-string 1) "S"))
+                (syntax-code (match-string 2)))
+            (unless syntax-code
+              (error "Incomplete \\%s sequence" (match-string 1)))
+            (goto-char (match-end 0))
+            (push (xr--char-syntax negated (string-to-char syntax-code))
+                  sequence)))
 
-       (t (error "Backslash at end of regexp"))))
+         ;; character categories
+         ((looking-at (rx "\\" (group (any "cC")) (opt (group anything))))
+          (let ((negated (string-equal (match-string 1) "C"))
+                (category-code (match-string 2)))
+            (unless category-code
+              (error "Incomplete \\%s sequence" (match-string 1)))
+            (goto-char (match-end 0))
+            (push (xr--char-category negated (string-to-char category-code))
+                  sequence)))
+
+         ;; Escaped character. Only \*+?.^$[ really need escaping, but we
+         ;; accept any not otherwise handled character after the backslash
+         ;; since such sequences are found in the wild.
+         ((looking-at (rx "\\" (group (or (any "\\*+?.^$[]")
+                                          (group anything)))))
+          (forward-char 2)
+          (push (match-string 1) sequence)
+          (when (match-beginning 2)
+            ;; Note that we do not warn about \\], since the symmetry with \\[
+            ;; makes it unlikely to be a serious error.
+            (xr--report warnings (match-beginning 0)
+                        (format "Escaped non-special character `%s'"
+                                (xr--escape-string (match-string 2) nil)))))
+
+         (t (error "Backslash at end of regexp")))
+
+        (when (and warnings (cdr sequence))
+          ;; Check for subsuming repetitions in sequence: (Rx X) (Ry Y)
+          ;; where Rx and Ry are repetition operators, and X and Y are operands.
+          ;; We conclude that (Rx X) subsumes (Ry Y) if Rx can match
+          ;; infinitely many times, Ry can match zero times,
+          ;; and X matches a superset of Y. Example: [ab]+a?
+          (let* ((item (car sequence))
+                 (expr (and (consp item)
+                            (memq (car item)
+                                  '(zero-or-more one-or-more opt *? +? ??))
+                            (xr--make-seq (cdr item)))))
+            (when expr
+              (let* ((prev-item (cadr sequence))
+                     (prev-expr
+                      (and (consp prev-item)
+                           (memq (car prev-item)
+                                 '(zero-or-more one-or-more opt *? +? ??))
+                           (xr--make-seq (cdr prev-item)))))
+                (when prev-expr
+                  (cond
+                   ((and (memq (car item) '(zero-or-more opt *? ??))
+                         (memq (car prev-item)
+                               '(zero-or-more one-or-more *? +?))
+                         (xr--superset-p prev-expr expr))
+                    (xr--report warnings item-start
+                                "Repetition subsumed by preceding repetition"))
+                   ((and (memq (car prev-item) '(zero-or-more opt *? ??))
+                         (memq (car item) '(zero-or-more one-or-more *? +?))
+                         (xr--superset-p expr prev-expr))
+                    (xr--report
+                     warnings item-start
+                     "Repetition subsumes preceding repetition"))))))))))
 
     (let ((item-seq (xr--rev-join-seq sequence)))
       (cond ((null item-seq)
