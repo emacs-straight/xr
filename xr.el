@@ -3,7 +3,7 @@
 ;; Copyright (C) 2019-2020 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.17
+;; Version: 1.18
 ;; Package-Requires: ((emacs "26.1"))
 ;; URL: https://github.com/mattiase/xr
 ;; Keywords: lisp, regexps
@@ -29,6 +29,8 @@
 
 ;;; News:
 
+;; Version 1.18:
+;; - Fix test broken in Emacs 26
 ;; Version 1.17:
 ;; - Performance improvements
 ;; Version 1.16:
@@ -1151,8 +1153,7 @@ A-SETS and B-SETS are arguments to `any'."
         (push seq alternatives)))
     (if (cdr alternatives)
         ;; Simplify (or nonl "\n") to anything
-        (if (or (equal alternatives '(nonl "\n"))
-                (equal alternatives '("\n" nonl)))
+        (if (member alternatives '((nonl "\n") ("\n" nonl)))
             'anything
           (cons 'or (nreverse alternatives)))
       (car alternatives))))
