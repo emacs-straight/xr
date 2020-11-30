@@ -3,7 +3,7 @@
 ;; Copyright (C) 2019-2020 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 1.19
+;; Version: 1.20
 ;; Package-Requires: ((emacs "26.1"))
 ;; URL: https://github.com/mattiase/xr
 ;; Keywords: lisp, regexps
@@ -29,6 +29,10 @@
 
 ;;; News:
 
+;; Version 1.20:
+;; - Fix duplication removal in character alternatives, like [aaa]
+;; - All diagnostics are now described in the README file
+;; - Improved anchor conflict checks
 ;; Version 1.19:
 ;; - Added filename-specific checks; new PURPOSE argument to `xr-lint'
 ;; - Warn about wrapped subsumption, like \(A*C[AB]*\)+
@@ -111,11 +115,11 @@
                        (xr--escape-string (match-string 0) nil)))))
       (goto-char (match-end 0)))
      ;; Initial ]
-     ((looking-at "]")
+     ((eq (following-char) ?\])
       (push (vector ?\] ?\] (point)) intervals)
       (forward-char 1)))
 
-    (while (not (looking-at "]"))
+    (while (not (eq (following-char) ?\]))
       (cond
        ;; character class
        ((looking-at (rx "[:" (group (* (not (any ":")))) ":]"))
@@ -153,7 +157,7 @@
                          "Two-character range `%s'"
                          (xr--escape-string (match-string 0) nil))))
           (goto-char (match-end 0))))
-       ((looking-at (rx eos))
+       ((eobp)
         (error "Unterminated character alternative"))
        ;; plain character (including ^ or -)
        (t
@@ -192,47 +196,45 @@
       (while (cdr s)
         (let ((this (car s))
               (next (cadr s)))
-          (when (>= (aref this 1) (aref next 0))
-            (let ((message
-                   (cond
-                    ;; Duplicate character: drop it and warn.
-                    ((and (eq (aref this 0) (aref this 1))
-                          (eq (aref next 0) (aref next 1)))
-                     (setcdr s (cddr s))
-                     (format-message
-                      "Duplicated `%c' inside character alternative"
-                      (aref this 0)))
-                    ;; Duplicate range: drop it and warn.
-                    ((and (eq (aref this 0) (aref next 0))
-                          (eq (aref this 1) (aref next 1)))
-                     (setcdr s (cddr s))
-                     (format-message
-                      "Duplicated `%c-%c' inside character alternative"
-                      (aref this 0) (aref this 1)))
-                    ;; Character in range: drop it and warn.
-                    ((eq (aref this 0) (aref this 1))
-                     (setcar s next)
-                     (setcdr s (cddr s))
-                     (format-message
-                      "Character `%c' included in range `%c-%c'"
-                      (aref this 0) (aref next 0) (aref next 1)))
-                    ;; Same but other way around.
-                    ((eq (aref next 0) (aref next 1))
-                     (setcdr s (cddr s))
-                     (format-message
-                      "Character `%c' included in range `%c-%c'"
-                      (aref next 0) (aref this 0) (aref this 1)))
-                    ;; Overlapping ranges: merge and warn.
-                    (t
-                     (let ((this-end (aref this 1)))
-                       (aset this 1 (max (aref this 1) (aref next 1)))
-                       (setcdr s (cddr s))
-                       (format-message "Ranges `%c-%c' and `%c-%c' overlap"
-                                       (aref this 0) this-end
-                                       (aref next 0) (aref next 1)))))))
-              (xr--report warnings (max (aref this 2) (aref next 2))
-                          (xr--escape-string message nil)))))
-        (setq s (cdr s)))
+          (if (>= (aref this 1) (aref next 0))
+              ;; Overlap.
+              (let ((message
+                     (cond
+                      ;; Duplicate character: drop it and warn.
+                      ((and (eq (aref this 0) (aref this 1))
+                            (eq (aref next 0) (aref next 1)))
+                       (format-message
+                        "Duplicated `%c' inside character alternative"
+                        (aref this 0)))
+                      ;; Duplicate range: drop it and warn.
+                      ((and (eq (aref this 0) (aref next 0))
+                            (eq (aref this 1) (aref next 1)))
+                       (format-message
+                        "Duplicated `%c-%c' inside character alternative"
+                        (aref this 0) (aref this 1)))
+                      ;; Character in range: drop it and warn.
+                      ((eq (aref this 0) (aref this 1))
+                       (setcar s next)
+                       (format-message
+                        "Character `%c' included in range `%c-%c'"
+                        (aref this 0) (aref next 0) (aref next 1)))
+                      ;; Same but other way around.
+                      ((eq (aref next 0) (aref next 1))
+                       (format-message
+                        "Character `%c' included in range `%c-%c'"
+                        (aref next 0) (aref this 0) (aref this 1)))
+                      ;; Overlapping ranges: merge and warn.
+                      (t
+                       (let ((this-end (aref this 1)))
+                         (aset this 1 (max (aref this 1) (aref next 1)))
+                         (format-message "Ranges `%c-%c' and `%c-%c' overlap"
+                                         (aref this 0) this-end
+                                         (aref next 0) (aref next 1)))))))
+                (xr--report warnings (max (aref this 2) (aref next 2))
+                            (xr--escape-string message nil))
+                (setcdr s (cddr s)))
+            ;; No overlap.
+            (setq s (cdr s)))))
             
       ;; Gather ranges and single characters separately.
       ;; We make no attempts at merging adjacent intervals/characters,
@@ -246,9 +248,9 @@
             (push (string (aref interv 0) ?- (aref interv 1))
                   ranges)))
         
-        ;; Note that we return (any) for non-negated empty sets,
-        ;; such as [z-a]. (any) is not accepted by rx but at least we
-        ;; are not hiding potential bugs from the user.
+        ;; We return (any) for non-negated empty sets, such as [z-a].
+        ;; `unmatchable' would perhaps be better; both require Emacs 27.1
+        ;; or newer for use in rx.
         (cond
          ;; Negated empty set, like [^z-a]: anything.
          ((and negated
@@ -444,29 +446,6 @@ UPPER may be nil, meaning infinity."
      (cl-every #'xr--matches-empty-p body))
     ("" t)))
 
-(defun xr--matches-nonempty-only-p (rx)
-  "Whether RX matches non-empty strings only."
-  (pcase rx
-    ((pred stringp) (> (length rx) 0))
-    (`(,(or 'seq 'one-or-more '+? 'group) . ,body)
-     (cl-some #'xr--matches-nonempty-only-p body))
-    (`(or . ,body)
-     (cl-every #'xr--matches-nonempty-only-p body))
-    (`(group-n ,_ . ,body)
-     (cl-some #'xr--matches-nonempty-only-p body))
-    (`(repeat ,from ,_ . ,body)
-     (and (> from 0)
-          (cl-some #'xr--matches-nonempty-only-p body)))
-    (`(,(or '= '>=) ,n . ,body)
-     (and (> n 0)
-          (cl-some #'xr--matches-nonempty-only-p body)))
-    (`(,(or 'any 'not 'intersection) . ,_) t)
-    ((or 'ascii 'alnum 'alpha 'blank 'cntrl 'digit 'graph
-         'lower 'multibyte 'nonascii 'print 'punct 'space
-         'unibyte 'upper 'word 'xdigit
-         'nonl 'anything)
-     t)))
-
 (defun xr--adjacent-subsumption (a b)
   "Check if A subsumes B, or vice versa, or not, assuming they are adjacent.
 Return `a-subsumes-b', `b-subsumes-a' or nil."
@@ -532,7 +511,7 @@ like (* (* X) ... (* X))."
       (let ((item-start (point)))
         (cond
          ;; ^ - only special at beginning of sequence
-         ((looking-at (rx "^"))
+         ((eq (following-char) ?^)
           (forward-char 1)
           (if (null sequence)
               (progn
@@ -545,7 +524,7 @@ like (* (* X) ... (* X))."
             (push "^" sequence)))
 
          ;; $ - only special at end of sequence
-         ((looking-at (rx "$"))
+         ((eq (following-char) ?$)
           (forward-char 1)
           (if (looking-at (rx (or "\\|" "\\)" eos)))
               (progn
@@ -741,13 +720,14 @@ like (* (* X) ... (* X))."
                 sequence))
 
          ;; not-newline
-         ((looking-at (rx "."))
-          (goto-char (match-end 0))
+         ((eq (following-char) ?.)
+          (forward-char)
           ;; Assume that .* etc is intended.
           (when (and (eq purpose 'file)
                      (not (looking-at (rx (any "?*+")))))
-            (xr--report warnings (match-beginning 0)
-                        "Possibly unescaped `.' in file-matching regexp"))
+            (xr--report warnings (1- (point))
+                        (format-message
+                         "Possibly unescaped `.' in file-matching regexp")))
           (push 'nonl sequence))
 
          ;; various simple substitutions
@@ -906,7 +886,7 @@ nil if RX only matches the empty string."
      (if (= n 0)
          (and (cl-some #'xr--matches-nonempty body) 'sometimes)
        (xr--tristate-some #'xr--matches-nonempty body)))
-    (`(,(or 'any 'not 'intersection) . ,_) 'always)
+    (`(,(or 'any 'not 'intersection 'syntax 'category) . ,_) 'always)
     ((or 'ascii 'alnum 'alpha 'blank 'cntrl 'digit 'graph
          'lower 'multibyte 'nonascii 'print 'punct 'space
          'unibyte 'upper 'word 'xdigit
@@ -1460,7 +1440,7 @@ A-SETS and B-SETS are arguments to `any'."
     (xr--report warnings (point)
                 (format-message "Suspect skip set framed in `[...]'")))
 
-  (let ((negated (looking-at (rx "^")))
+  (let ((negated (eq (following-char) ?^))
         (start-pos (point))
         (ranges nil)
         (classes nil))
@@ -1729,6 +1709,8 @@ in SKIP-SET-STRING."
   "Escape non-printing characters in a string for maximum readability.
 If ESCAPE-PRINTABLE, also escape \\ and \", otherwise don't."
   (replace-regexp-in-string
+   ;; We don't use rx here because of bugs in dealing with raw chars
+   ;; prior to Emacs 27.1.
    "[\x00-\x1f\"\\\x7f\x80-\xff][[:xdigit:]]?"
    (lambda (s)
      (let* ((c (logand (string-to-char s) #xff))
