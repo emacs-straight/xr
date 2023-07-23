@@ -765,7 +765,13 @@ like (* (* X) ... (* X))."
             (forward-char)
             (let ((sym (cdr (assq
                              next-char
-                             '((?w . wordchar) (?W . not-wordchar)
+                             ;; Note that translating \w to wordchar isn't
+                             ;; right, since `wordchar' yields [[:word:]] which
+                             ;; does not respect syntax properties.
+                             ;; We translate \W to (not (syntax word)) for
+                             ;; consistency, rather than the confusingly
+                             ;; named legacy `not-wordchar'.
+                             '((?w . (syntax word)) (?W . (not (syntax word)))
                                (?` . bos) (?\' . eos)
                                (?= . point)
                                (?b . word-boundary) (?B . not-word-boundary)
@@ -880,24 +886,51 @@ like (* (* X) ... (* X))."
             (t 
              (cons 'seq item-seq))))))
 
+;; Our tristate logic: {nil, sometimes, always}
+;; ┌─────────┬─────────┬─────────┬─────────┐
+;; │A        │B        │A OR B   │A AND* B │
+;; ├─────────┼─────────┼─────────┼─────────┤
+;; │nil      │nil      │nil      │nil      │
+;; │sometimes│nil      │sometimes│sometimes│ <- not nil!
+;; │sometimes│sometimes│sometimes│sometimes│
+;; │always   │nil      │always   │sometimes│ <- not nil!
+;; │always   │sometimes│always   │sometimes│
+;; │always   │always   │always   │always   │
+;; └─────────┴─────────┴─────────┴─────────┘
+
 (defun xr--tristate-some (f list)
   "Whether F is true for some element in LIST.
 Return `always' if F returns `always' for at least one element,
 nil if F returns nil for all elements,
 `sometimes' otherwise."
-  (let ((result (mapcar f list)))
-    (cond ((memq 'always result) 'always)
-          ((memq 'sometimes result) 'sometimes))))
+  ;; This is the n-ary OR operator in the table above.
+  (let ((ret nil))
+    (while (and list
+                (let ((val (funcall f (car list))))
+                  (when val
+                    (setq ret val))
+                  (not (eq val 'always))))
+      (setq list (cdr list)))
+    ret))
 
 (defun xr--tristate-all (f list)
   "Whether F is true for all elements in LIST.
 Return `always' if F returns `always' for all elements,
-nil if F returns nil for all elements,
+otherwise nil if F returns nil for all elements,
 `sometimes' otherwise."
-  (let ((results (mapcar f list)))
-    (cond ((memq nil results) (and (delq nil results) 'sometimes))
-          ((memq 'sometimes results) 'sometimes)
-          (t 'always))))
+  ;; This is the n-ary AND* operator in the table above.
+  (if list
+      (let ((ret (funcall f (car list))))
+        (unless (eq ret 'sometimes)
+          (setq list (cdr list))
+          (while (and list
+                      (or (eq (funcall f (car list)) ret)
+                          (progn
+                            (setq ret 'sometimes)
+                            nil)))
+            (setq list (cdr list))))
+        ret)
+    'always))
 
 (defun xr--matches-nonempty (rx)
   "Whether RX matches non-empty strings. Return `always', `sometimes' or nil.
@@ -956,7 +989,7 @@ nil if RX only matches the empty string."
                            (cdr item)))))
 
 (defun xr--starts-with-nonl (item)
-  "Whether ITEM starts with a non-newline. Return `always', `maybe' or nil."
+  "Whether ITEM starts with a non-newline. Return `always', `sometimes' or nil."
   (pcase item
     ((pred stringp)
      (and (> (length item) 0) (not (eq (aref item 0) ?\n)) 'always))
@@ -981,7 +1014,7 @@ nil if RX only matches the empty string."
      'always)))
 
 (defun xr--ends-with-nonl (item)
-  "Whether ITEM ends with a non-newline. Return `always', `maybe' or nil."
+  "Whether ITEM ends with a non-newline. Return `always', `sometimes' or nil."
   (pcase item
     ((pred stringp)
      (and (> (length item) 0) (not (eq (aref item (1- (length item))) ?\n))
