@@ -477,6 +477,43 @@
                    '((1 . "Range `A-z' between upper and lower case includes symbols"))))
     ))
 
+(ert-deftest xr-lint-noisy ()
+  (let ((text-quoting-style 'grave))
+    (dolist (checks '(nil all))
+      (ert-info ((prin1-to-string checks) :prefix "checks: ")
+        (should
+         (equal
+          (xr-lint "[0-9+-/*][&-+=]" nil checks)
+          (if (eq checks 'all)
+              '((4 . "Suspect character range `+-/': should `-' be literal?")
+                (10 . "Suspect character range `&-+': should `-' be literal?"))
+            nil)))
+        (should
+         (equal
+          (xr-lint "[ \\t][-.\\d][\\Sw][\\rnt]" nil checks)
+          (if (eq checks 'all)
+              '((2 . "Possibly erroneous `\\t' in character alternative")
+                (8 . "Possibly erroneous `\\d' in character alternative")
+                (12 . "Possibly erroneous `\\S' in character alternative")))))
+        (should (equal (xr-lint "\\(?:ta\\)\\(:?da\\)\\(:?\\)" nil checks)
+                       (if (eq checks 'all)
+                           '((10 . "Possibly mistyped `:?' at start of group"))
+                         nil)))
+        (should
+         (equal
+          (xr-lint "%\\|[abc]\\|[[:digit:]]\\|\\s-\\|\\s_"
+                   nil checks)
+          (if (eq checks 'all)
+              '((3 . "Or-pattern more efficiently expressed as character alternative")
+                (10 . "Or-pattern more efficiently expressed as character alternative")
+                (23 . "Or-pattern more efficiently expressed as character alternative"))
+            nil)))
+        (should (equal (xr-lint "\\(?:a?b+c?d*\\)*" nil checks)
+                       (if (eq checks 'all)
+                           '((14 . "Repetition of effective repetition"))
+                         nil)))
+        ))))
+
 (ert-deftest xr-lint-repetition-of-empty ()
   (let ((text-quoting-style 'grave))
     (should (equal
