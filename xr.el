@@ -3,7 +3,7 @@
 ;; Copyright (C) 2019-2024 Free Software Foundation, Inc.
 
 ;; Author: Mattias Engdegård <mattiase@acm.org>
-;; Version: 2.0
+;; Version: 2.1
 ;; Package-Requires: ((emacs "27.1"))
 ;; URL: https://github.com/mattiase/xr
 ;; Keywords: lisp, regexps
@@ -83,9 +83,13 @@ END is nil if unknown."
                                 lower multibyte nonascii print punct space
                                 unibyte upper word xdigit)))
 
-(pcase-defmacro xr--char-class ()
-  "Match any standard regexp char class as a symbol."
-  `(or ,@(mapcar (lambda (x) `(quote ,x)) xr--char-classes)))
+;; FIXME: `eval-and-compile' around `pcase-defmacro' only necessary
+;; for compatibility with Emacs 27.
+(eval-and-compile
+  (pcase-defmacro xr--char-class ()
+    "Match any standard regexp char class as a symbol."
+    `(or ,@(mapcar (lambda (x) `(quote ,x)) xr--char-classes)))
+  )
 
 (defvar xr--string)
 (defvar xr--len)
