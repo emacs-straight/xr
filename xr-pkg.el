@@ -1,2 +1,2 @@
-;; Generated package description from xr.el  -*- no-byte-compile: t -*-
-(define-package "xr" "2.1.0.20241229.210720" "Convert string regexp to rx notation" '((emacs "27.1")) :commit "31cd397f54591e3692bf88d6e1995236928e3561" :authors '(("Mattias Engdegård" . "mattiase@acm.org")) :maintainer '("Mattias Engdegård" . "mattiase@acm.org") :keywords '("lisp" "regexps") :url "https://github.com/mattiase/xr")
+;; Generated package description from xr.el  -*- mode: lisp-data; no-byte-compile: t -*-
+(define-package "xr" "2.1.0.20250224.150416" "Convert string regexp to rx notation" '((emacs "27.1")) :commit "676ce6a62dd46bc7c10b76a3e598c679def51fe3" :authors '(("Mattias Engdegård" . "mattiase@acm.org")) :maintainer '("Mattias Engdegård" . "mattiase@acm.org") :keywords '("lisp" "regexps") :url "https://github.com/mattiase/xr")
